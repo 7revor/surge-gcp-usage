@@ -178,21 +178,30 @@ function mergeCounts(list) {
 
 async function queryBilling(token, acc, month) {
   if (!/^[\w-]+\.[\w]+$/.test(acc.billingDataset || "")) throw new Error("billingDataset 格式应为 项目ID.数据集");
+  // usage_end：本月整张账单表（不限服务）里最新的用量结束时间，即账单统计截止点。
+  // 不能只看流量行：某段时间没有出站流量时，流量行的时间会停在过去。
+  // 用 LEFT JOIN 保证即使三类服务都没有记录，也会返回一行 usage_end。
   const sql = `
-SELECT
-  service.description AS service,
-  sku.description AS sku,
-  ANY_VALUE(usage.pricing_unit) AS unit,
-  SUM(usage.amount_in_pricing_units) AS qty,
-  SUM(cost) AS cost,
-  SUM((SELECT IFNULL(SUM(c.amount), 0) FROM UNNEST(credits) c WHERE c.type = 'FREE_TIER')) AS free_credit,
-  SUM((SELECT IFNULL(SUM(c.amount), 0) FROM UNNEST(credits) c WHERE IFNULL(c.type, '') != 'FREE_TIER')) AS other_credit,
-  ANY_VALUE(currency) AS currency,
-  MAX(export_time) AS export_time
-FROM \`${acc.billingDataset}.gcp_billing_export_v1_*\`
-WHERE invoice.month = '${month}'
-  AND REGEXP_CONTAINS(service.description, r'(?i)compute engine|vision|translat')
-GROUP BY service, sku`;
+WITH m AS (
+  SELECT * FROM \`${acc.billingDataset}.gcp_billing_export_v1_*\`
+  WHERE invoice.month = '${month}'
+),
+c AS (SELECT MAX(usage_end_time) AS usage_end FROM m),
+g AS (
+  SELECT
+    service.description AS service,
+    sku.description AS sku,
+    ANY_VALUE(usage.pricing_unit) AS unit,
+    SUM(usage.amount_in_pricing_units) AS qty,
+    SUM(cost) AS cost,
+    SUM((SELECT IFNULL(SUM(x.amount), 0) FROM UNNEST(credits) x WHERE x.type = 'FREE_TIER')) AS free_credit,
+    SUM((SELECT IFNULL(SUM(x.amount), 0) FROM UNNEST(credits) x WHERE IFNULL(x.type, '') != 'FREE_TIER')) AS other_credit,
+    ANY_VALUE(currency) AS currency
+  FROM m
+  WHERE REGEXP_CONTAINS(service.description, r'(?i)compute engine|vision|translat')
+  GROUP BY service, sku
+)
+SELECT g.*, c.usage_end FROM c LEFT JOIN g ON TRUE`;
   const project = acc.billingDataset.split(".")[0];
   let res = await request("POST", `https://bigquery.googleapis.com/bigquery/v2/projects/${project}/queries`, token, {
     query: sql,
@@ -226,7 +235,7 @@ GROUP BY service, sku`;
 function summarizeBilling(rows) {
   const s = {
     currency: "",
-    exportTime: 0,
+    usageEnd: 0, // 账单统计截止时间（秒），0 表示本月还没有账单数据
     vision: { qty: 0, unit: "", net: 0 },
     translate: { qty: 0, unit: "", net: 0 },
     freeGiB: 0,
@@ -242,8 +251,9 @@ function summarizeBilling(rows) {
     const cost = Number(r.cost) || 0;
     const freeCredit = Number(r.free_credit) || 0;
     const net = cost + freeCredit + (Number(r.other_credit) || 0);
+    s.usageEnd = Math.max(s.usageEnd, Number(r.usage_end) || 0);
+    if (r.service == null) continue; // 本月没有这三类服务的记录时，只有一行 usage_end
     s.currency = s.currency || r.currency || "";
-    s.exportTime = Math.max(s.exportTime, Number(r.export_time) || 0);
 
     if (/vision/i.test(r.service) || /translat/i.test(r.service)) {
       const t = /vision/i.test(r.service) ? s.vision : s.translate;
@@ -306,9 +316,6 @@ function render(blocks) {
     if (blocks.length > 1) who = g.names.length === blocks.length ? "（全部账号）" : `（${g.names.join("、")}）`;
     footer.push(`⚠ ${g.scope}：${g.msg}${who}`);
   }
-  const times = blocks.map((b) => b.billing && b.billing.exportTime).filter(Boolean);
-  if (times.length) footer.push(`账单截至 ${mmddhhmm(new Date(Math.min.apply(null, times) * 1000))}`);
-
   return footer.length ? body + "\n\n" + footer.join("\n") : body;
 }
 
@@ -330,10 +337,16 @@ function renderAccount(b, issues) {
     if (bill.translate.net >= 0.01) costs.push(`Translate ${money(bill.translate.net, bill.currency)}`);
     if (costs.length) lines.push(`Cost: ${costs.join(" · ")}`);
 
-    // Free：标准层出站 / 免费额度，账单确认有超额收费时行首加 ‼；Paid：收费流量 / 流量费用
-    const free = `Traffic Free: ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`;
-    lines.push(bill.stdOverGiB > 0 ? "‼ " + free : free);
-    lines.push(`Traffic Paid: ${gib(bill.paidGiB)} / ${money(bill.paidCost, bill.currency)}`);
+    // 流量分组：标题带账单统计截止时间（手机本地时间，表示此前的用量已计入）
+    // Free：标准层出站 / 免费额度，账单确认有超额收费时加 ‼；Paid：收费流量 / 流量费用
+    if (!bill.usageEnd) {
+      lines.push("Traffic: 本月暂无账单");
+    } else {
+      lines.push(`Traffic (thru ${mmddhhmm(new Date(bill.usageEnd * 1000))}):`);
+      const free = `Free: ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`;
+      lines.push("  " + (bill.stdOverGiB > 0 ? "‼ " + free : free));
+      lines.push(`  Paid: ${gib(bill.paidGiB)} / ${money(bill.paidCost, bill.currency)}`);
+    }
   }
   return lines.join("\n");
 }

@@ -49,7 +49,7 @@ function width(s) {
 }
 
 function bqResponse(rows) {
-  const fields = ["service", "sku", "unit", "qty", "cost", "free_credit", "other_credit", "currency", "export_time"];
+  const fields = ["service", "sku", "unit", "qty", "cost", "free_credit", "other_credit", "currency", "usage_end"];
   return {
     jobComplete: true,
     schema: { fields: fields.map((name) => ({ name })) },
@@ -198,10 +198,13 @@ function tokenRoute(keys) {
   assert.strictEqual(r.result.icon, undefined);
   assert.match(c, /▸ 主号\n‼ Vision: 1,200 \/ 1,000\n/); // 只统计文档识别（label_detection 不计），超额加 ‼；不显示调用次数
   assert.match(c, /Translate: 5\.6K \/ 500K\n/); // 字符数来自配额指标，不用账单
-  assert.match(c, /Cost: Vision \$0\.75\nTraffic Free: 14\.6G \/ 200G\nTraffic Paid: 0\.01G \/ \$0\.0004\n/); // Free 只算标准层出站；Paid 为对等互连
+  assert.match(c, /Cost: Vision \$0\.75\nTraffic \(thru \d\d-\d\d \d\d:\d\d\):\n  Free: 14\.6G \/ 200G\n  Paid: 0\.01G \/ \$0\.0004\n/); // Free 只算标准层出站；Paid 为对等互连
+  assert.match(bqSql, /MAX\(usage_end_time\) AS usage_end FROM m\)/); // 截止时间取整张表，不限服务
+  assert.match(bqSql, /LEFT JOIN g ON TRUE/);
   assert.match(c, /▸ 副号\nVision: \? \/ 1,000\nTranslate: \? \/ 500K\n/);
-  assert.match(c, /Translate: \? \/ 500K\n‼ Traffic Free: 231G \/ 200G\nTraffic Paid: 30\.5G \/ \$2\.60\n/); // 标准出站超额计入 Paid
-  assert.match(c, /\n\n⚠ 用量：无权限（副号）\n账单截至 \d\d-\d\d \d\d:\d\d$/);
+  assert.match(c, /Translate: \? \/ 500K\nTraffic \(thru \d\d-\d\d \d\d:\d\d\):\n  ‼ Free: 231G \/ 200G\n  Paid: 30\.5G \/ \$2\.60\n/); // 标准出站超额计入 Paid
+  assert.match(c, /\n\n⚠ 用量：无权限（副号）$/); // 截止时间已移到各账号的 Traffic 标题，页脚不再显示
+  assert.doesNotMatch(c, /账单截至/);
   for (const line of (r.result.title + "\n" + c).split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
   assert.ok(r.notified, "notify=1 应推送通知");
   console.log("✓ 双账号流程、流量分类、部分失败显示");
@@ -229,7 +232,7 @@ function tokenRoute(keys) {
     assert.strictEqual(r3.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
     assert.doesNotMatch(r3.result.content, /密钥无效|⚠/);
     assert.match(r3.result.content, /Vision: 1,200 \/ 1,000/);
-    assert.match(r3.result.content, /Traffic Free: 14\.6G \/ 200G/);
+    assert.match(r3.result.content, /  Free: 14\.6G \/ 200G/);
     assert.strictEqual(JSON.parse(store.get(cacheKey)).token, "tok-" + k1.json.client_email);
     console.log("✓ token 失效时自动重新签发");
   }
@@ -250,7 +253,21 @@ function tokenRoute(keys) {
     // 两个区域各 150：合计超过 200，但账单为 0 → 全部免费
     let s = ctx.summarizeBilling([row("Oregon", 150, 0), row("Iowa", 150, 0)]);
     assert.deepStrictEqual([s.stdGiB, s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [300, 0, 300, 0, 0]);
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\nTraffic Free: 300G \/ 200G\n/); // 账单为 0 时不标 ‼
+    s.usageEnd = 1;
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n  Free: 300G \/ 200G\n/); // 账单为 0 时不标 ‼
+    // 截止时间按手机本地时间显示，取所有行中最晚的 usage_end
+    const end = new Date(2026, 10, 10, 13, 0).getTime() / 1000;
+    s = ctx.summarizeBilling([{ ...row("Oregon", 1, 0), usage_end: String(end) }, { ...row("Iowa", 1, 0), usage_end: String(end - 3600) }]);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\nTraffic \(thru 11-10 13:00\):\n  Free: 2\.00G \/ 200G\n/);
+    // 本月还没有账单数据：LEFT JOIN 返回一行全空，显示「暂无账单」而不是 0G
+    s = ctx.summarizeBilling([{ service: null, sku: null, unit: null, qty: null, cost: null, free_credit: null, other_credit: null, currency: null, usage_end: null }]);
+    assert.strictEqual(s.usageEnd, 0);
+    const empty = ctx.renderAccount({ acc: { name: "x" }, billing: s }, []);
+    assert.match(empty, /\nTraffic: 本月暂无账单$/);
+    assert.doesNotMatch(empty, /Free:|Paid:/);
+    // 只有其他服务的记录（三类服务都没有）：有截止时间，流量为 0
+    s = ctx.summarizeBilling([{ service: null, usage_end: String(end) }]);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\nTraffic \(thru 11-10 13:00\):\n  Free: 0G \/ 200G\n  Paid: 0G \/ \$0\.00$/);
     // 一个区域 250、另一个 50，有费用 → 只有超出的 50 收费
     s = ctx.summarizeBilling([row("Oregon", 250, 4.25), row("Iowa", 50, 0)]);
     assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [50, 250, 50, 4.25]);
