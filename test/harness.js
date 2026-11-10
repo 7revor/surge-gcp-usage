@@ -347,6 +347,21 @@ function tokenRoute(keys) {
     assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 99.97 }, []), /\n流量：100G$/); // 进位后不显示成 100.0G
     assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 9.996 }, []), /\n流量：10\.0G$/);
     console.log("✓ 进度条、零用量显示、图标状态色");
+
+    // 参数开关：bar=0 不显示进度条，percent=0 不显示百分比，‼ 始终显示；两个都关时数值紧跟标签
+    const q = { "vision.googleapis.com/document_text_detection_requests": 1200, "translate.googleapis.com/default": 312000 };
+    const lines = async (argument) => {
+      const { ctx: c } = await run({ accounts: [], routes: [], argument });
+      return c.renderAccount({ acc: { name: "x" }, quota: q }, []).split("\n").slice(1, 3).join(" | ");
+    };
+    assert.strictEqual(await lines(""), "识图：▰▰▰▰▰▰ 1.2K / 1K ‼ | 翻译：▰▰▰▱▱▱ 312K / 500K · 62%");
+    assert.strictEqual(await lines("bar=0"), "识图：1.2K / 1K ‼ | 翻译：312K / 500K · 62%");
+    assert.strictEqual(await lines("percent=0"), "识图：▰▰▰▰▰▰ 1.2K / 1K ‼ | 翻译：▰▰▰▱▱▱ 312K / 500K");
+    assert.strictEqual(await lines("bar=0&percent=0&notify=1"), "识图：1.2K / 1K ‼ | 翻译：312K / 500K");
+    assert.strictEqual(await lines("bar=1&percent=true"), "识图：▰▰▰▰▰▰ 1.2K / 1K ‼ | 翻译：▰▰▰▱▱▱ 312K / 500K · 62%");
+    const { ctx: off } = await run({ accounts: [], routes: [], argument: "bar=0&percent=0" });
+    assert.strictEqual(off.renderAccount({ acc: { name: "x" }, quota: null }, []).split("\n")[1], "识图：? / 1K"); // 数据缺失
+    console.log("✓ bar / percent 参数开关");
   }
 
   // 3c. 时间预算用完后不再发请求，直接报超时

@@ -8,7 +8,10 @@
  *
  * 认证：服务账号 JSON 密钥，脚本内用纯 JS 实现 RS256 签 JWT 换 access token（缓存 ~1 小时）。
  *
- * 参数（$argument，可选）：notify=1 时额外推送通知（配合 cron 使用）
+ * 参数（$argument，可选，多个用 & 连接）：
+ *   notify=1   额外推送通知（配合 cron 使用）
+ *   bar=0      不显示进度条（默认显示）
+ *   percent=0  不显示行尾的百分比（默认显示）；额度用完时的 ‼ 始终显示
  */
 
 // <config>
@@ -452,11 +455,15 @@ function apiUsed(b, key) {
 /**
  * 进度条 + 数值 + 百分比，例：「▰▰▰▱▱▱ 640 / 1K · 64%」。
  * full（额度已用完或超额）时进度条填满、百分比换成 ‼；数据缺失时进度条全空、不显示百分比。
+ * 进度条和百分比可以用参数 bar=0 / percent=0 关掉，‼ 始终显示。
  */
 function meter(used, limit, value, full) {
-  if (full) return `${"▰".repeat(BAR_CELLS)} ${value} ‼`;
-  if (used === null || used === undefined) return `${"▱".repeat(BAR_CELLS)} ${value}`;
-  return `${bar(used, limit)} ${value} · ${percent(used, limit)}%`;
+  const missing = used === null || used === undefined;
+  let barText = full ? "▰".repeat(BAR_CELLS) : missing ? "▱".repeat(BAR_CELLS) : bar(used, limit);
+  let tail = full ? " ‼" : missing ? "" : ` · ${percent(used, limit)}%`;
+  if (!ARGS.bar) barText = "";
+  if (!ARGS.percent && !full) tail = "";
+  return (barText ? barText + " " : "") + value + tail;
 }
 
 /** 进度条：BAR_CELLS 格，和百分比一样向下取整（只有用完才填满），有用量时至少 1 格 */
@@ -606,7 +613,10 @@ function parseArgs(s) {
     const i = kv.indexOf("=");
     o[i < 0 ? kv : kv.slice(0, i)] = i < 0 ? "1" : decodeURIComponent(kv.slice(i + 1));
   }
-  o.notify = o.notify === "1" || o.notify === "true";
+  const on = (v, dflt) => (v === undefined ? dflt : v === "1" || v === "true");
+  o.notify = on(o.notify, false);
+  o.bar = on(o.bar, true);
+  o.percent = on(o.percent, true);
   return o;
 }
 

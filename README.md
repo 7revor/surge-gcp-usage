@@ -142,6 +142,30 @@ Surge 面板**不会在后台刷新**，脚本只在两种情况下运行：
 gcp-usage-notify = type=cron,cronexp="0 9 * * *",script-path=js/gcp-usage.js,timeout=60,argument=notify=1
 ```
 
+## 显示开关
+
+在 Surge 配置 `[Script]` 段的 gcp-usage 那一行加上 `argument`，可以关掉进度条或百分比，多个参数用 `&` 连接：
+
+```ini
+gcp-usage = type=generic,timeout=60,script-path=js/gcp-usage.js,argument=bar=0&percent=0
+```
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `bar=0` | 显示 | 不显示进度条，数值紧跟在标签后面，仍然自然对齐 |
+| `percent=0` | 显示 | 不显示行尾的百分比 |
+
+额度用完或超额时，行尾的「‼」始终显示。效果示例：
+
+```
+默认               识图：▰▱▱▱▱▱ 19 / 1K · 1%
+bar=0              识图：19 / 1K · 1%
+percent=0          识图：▰▱▱▱▱▱ 19 / 1K
+bar=0&percent=0    识图：19 / 1K
+```
+
+`install-surge.js` 发现配置里已经有 gcp-usage 这一行时不会改动它，所以重新安装不会覆盖这里的参数。定时通知那一行有自己的 `argument`，需要的话同样可以加，例如 `argument=notify=1&bar=0`。
+
 ## 注意
 
 - **调用次数和计费量不是一回事**：
