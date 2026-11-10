@@ -50,9 +50,10 @@ const FREE_QUOTA = {
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 
 // 面板外观：
-//   标签都是两个汉字加全角冒号，宽度相同，紧跟其后的进度条（▰ 已用 / ▱ 剩余）因此自然对齐；
-//   百分比放在行尾，用量达到额度时进度条填满，百分比换成 ‼
+//   账号名单独一行，下面各行按层级缩进（每级两个空格）；标签都是两个汉字加全角冒号
+//   有额度的行为「标签：已用 / 额度 进度条 百分比」（▰ 已用 / ▱ 剩余），用量达到额度时进度条填满，百分比换成 ‼
 //   图标用 SF Symbol，颜色表示整体状态：正常绿；用量达到 WARN_RATIO、有费用或数据未就绪橙；超额或认证失败红
+const INDENT = "  "; // 每级缩进两个普通空格
 const BAR_CELLS = 6; // 进度条格数；面板一行约 17.4em 宽，6 格时最长的「翻译」行也放得下
 const WARN_RATIO = 0.8;
 const ICON = "cloud.fill";
@@ -397,13 +398,15 @@ function render(blocks) {
 
 function renderAccount(b, issues) {
   const name = b.acc.name;
-  if (b.error) return [`账号：${name}`, `✗ ${shortErr(b.error)}`].join("\n");
+  if (b.error) return [name, `${INDENT}✗ ${shortErr(b.error)}`].join("\n");
   if (b.monitorError) issues.push({ scope: "用量", msg: shortErr(b.monitorError), name });
   if (b.billingError) issues.push({ scope: "账单", msg: shortErr(b.billingError), name });
 
-  const lines = [`账号：${name}`];
-  lines.push(apiLine(b, "vision", "识图"));
-  lines.push(apiLine(b, "translate", "翻译"));
+  // 账号名单独一行，下面各行缩进两格，流量下面的几行再缩进两格
+  const lines = [name];
+  const add = (level, text) => lines.push(INDENT.repeat(level) + text);
+  add(1, apiLine(b, "vision", "识图"));
+  add(1, apiLine(b, "translate", "翻译"));
 
   // 识图 / 翻译净费用：只在 ≥ $0.01 时显示
   const bill = b.billing;
@@ -411,20 +414,20 @@ function renderAccount(b, issues) {
     const costs = [];
     if (bill.vision.net >= 0.01) costs.push(`识图 ${money(bill.vision.net, bill.currency)}`);
     if (bill.translate.net >= 0.01) costs.push(`翻译 ${money(bill.translate.net, bill.currency)}`);
-    if (costs.length) lines.push(`费用：${costs.join(" · ")}`);
+    if (costs.length) add(1, `费用：${costs.join(" · ")}`);
   }
 
   // 流量：本月外部出站总量（Monitoring，实时）。下面缩进的免费 / 收费来自账单，最后一行是账单统计截止时间
   // （手机本地时间，表示此前的用量已计入），只对免费 / 收费有效
-  lines.push(`流量：${b.trafficGiB == null ? "?" : gib(b.trafficGiB)}`);
+  add(1, `流量：${b.trafficGiB == null ? "?" : gib(b.trafficGiB)}`);
   if (bill) {
     if (!bill.usageEnd) {
-      lines.push("  免费 / 收费：本月暂无账单");
+      add(2, "免费 / 收费：本月暂无账单");
     } else {
       // 免费：标准层出站 / 免费额度，账单确认有超额收费时进度条填满、百分比换成 ‼；收费：收费流量 · 流量费用
-      lines.push(`  免费：${meter(bill.stdGiB, STANDARD_FREE_GIB, `${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`, bill.stdOverGiB > 0)}`);
-      lines.push(`  收费：${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
-      lines.push(`  账单截至 ${mmddhhmm(new Date(bill.usageEnd * 1000))}`);
+      add(2, `免费：${meter(bill.stdGiB, STANDARD_FREE_GIB, `${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`, bill.stdOverGiB > 0)}`);
+      add(2, `收费：${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
+      add(2, `账单截至 ${mmddhhmm(new Date(bill.usageEnd * 1000))}`);
     }
   }
   return lines.join("\n");
@@ -453,17 +456,16 @@ function apiUsed(b, key) {
 }
 
 /**
- * 进度条 + 数值 + 百分比，例：「▰▰▰▱▱▱ 640 / 1K · 64%」。
+ * 数值 + 进度条 + 百分比，例：「640 / 1K ▰▰▰▱▱▱ 64%」。
  * full（额度已用完或超额）时进度条填满、百分比换成 ‼；数据缺失时进度条全空、不显示百分比。
- * 进度条和百分比可以用参数 bar=0 / percent=0 关掉，‼ 始终显示。
+ * 进度条和百分比可以用参数 bar=0 / percent=0 关掉，‼ 始终显示；关掉进度条时百分比前加「· 」。
  */
 function meter(used, limit, value, full) {
   const missing = used === null || used === undefined;
-  let barText = full ? "▰".repeat(BAR_CELLS) : missing ? "▱".repeat(BAR_CELLS) : bar(used, limit);
-  let tail = full ? " ‼" : missing ? "" : ` · ${percent(used, limit)}%`;
-  if (!ARGS.bar) barText = "";
-  if (!ARGS.percent && !full) tail = "";
-  return (barText ? barText + " " : "") + value + tail;
+  const barText = !ARGS.bar ? "" : full ? "▰".repeat(BAR_CELLS) : missing ? "▱".repeat(BAR_CELLS) : bar(used, limit);
+  let tail = full ? "‼" : missing || !ARGS.percent ? "" : `${percent(used, limit)}%`;
+  if (tail && !full && !barText) tail = "· " + tail;
+  return [value, barText, tail].filter(Boolean).join(" ");
 }
 
 /** 进度条：BAR_CELLS 格，和百分比一样向下取整（只有用完才填满），有用量时至少 1 格 */

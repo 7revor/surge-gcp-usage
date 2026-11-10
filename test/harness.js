@@ -218,14 +218,14 @@ function tokenRoute(keys) {
   assert.strictEqual(r.result.icon, "cloud.fill");
   assert.strictEqual(r.result["icon-color"], "#FF3B30"); // 有超额 → 红
   assert.match(r.result.title, /^GCP · \$3\.35 · \d\d:\d\d$/); // 标题带本月费用合计
-  assert.match(c, /账号：主号\n识图：▰▰▰▰▰▰ 1\.2K \/ 1K ‼\n/); // 只统计文档识别（label_detection 不计），超额时进度条填满、百分比换成 ‼；用 K 缩写；不显示调用次数
-  assert.match(c, /\n翻译：▰▱▱▱▱▱ 5\.6K \/ 500K · 1%\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格、至少 1%
+  assert.match(c, /主号\n  识图：1\.2K \/ 1K ▰▰▰▰▰▰ ‼\n/); // 只统计文档识别（label_detection 不计），超额时进度条填满、百分比换成 ‼；用 K 缩写；不显示调用次数
+  assert.match(c, /\n  翻译：5\.6K \/ 500K ▰▱▱▱▱▱ 1%\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格、至少 1%
   // 流量是 Monitoring 的外部出站（多个点求和）；缩进的免费 / 收费和截止时间来自账单
-  assert.match(c, /费用：识图 \$0\.75\n流量：15\.9G\n  免费：▰▱▱▱▱▱ 14\.6G \/ 200G · 7%\n  收费：0\.01G · \$0\.0004\n  账单截至 \d\d-\d\d \d\d:\d\d\n/); // 免费只算标准层出站；收费为对等互连
+  assert.match(c, /费用：识图 \$0\.75\n  流量：15\.9G\n    免费：14\.6G \/ 200G ▰▱▱▱▱▱ 7%\n    收费：0\.01G · \$0\.0004\n    账单截至 \d\d-\d\d \d\d:\d\d\n/); // 免费只算标准层出站；收费为对等互连
   assert.match(bqSql, /MAX\(usage_end_time\) AS usage_end FROM m\)/); // 截止时间取整张表，不限服务
   assert.match(bqSql, /LEFT JOIN g ON TRUE/);
-  assert.match(c, /账号：副号\n识图：▱▱▱▱▱▱ \? \/ 1K\n翻译：▱▱▱▱▱▱ \? \/ 500K\n流量：\?\n/); // 数据缺失时进度条全空、不显示百分比
-  assert.match(c, /流量：\?\n  免费：▰▰▰▰▰▰ 231G \/ 200G ‼\n  收费：30\.5G · \$2\.60\n  账单截至 /); // 标准出站超额计入收费
+  assert.match(c, /副号\n  识图：\? \/ 1K ▱▱▱▱▱▱\n  翻译：\? \/ 500K ▱▱▱▱▱▱\n  流量：\?\n/); // 数据缺失时进度条全空、不显示百分比
+  assert.match(c, /流量：\?\n    免费：231G \/ 200G ▰▰▰▰▰▰ ‼\n    收费：30\.5G · \$2\.60\n    账单截至 /); // 标准出站超额计入收费
   assert.match(c, /\n\n⚠ 用量：无权限（副号）$/);
   assert.doesNotMatch(c, /thru/);
   for (const line of (r.result.title + "\n" + c).split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
@@ -242,7 +242,7 @@ function tokenRoute(keys) {
     assert.ok(cached.token && cached.exp > Date.now() / 1000);
     const r2 = await run({ accounts: one, routes, store: r1.store });
     assert.strictEqual(r2.calls.filter((x) => /oauth2/.test(x.url)).length, 0, "第二次运行应使用缓存的 token");
-    assert.match(r2.result.content, /识图：▰▰▰▰▰▰ 1\.2K \/ 1K/);
+    assert.match(r2.result.content, /识图：1\.2K \/ 1K ▰▰▰▰▰▰/);
     console.log("✓ token 缓存生效");
 
     // 缓存的 token 已失效（401）：丢弃缓存，重新签发后重试一次
@@ -254,8 +254,8 @@ function tokenRoute(keys) {
     const r3 = await run({ accounts: one, routes: reject401, store });
     assert.strictEqual(r3.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
     assert.doesNotMatch(r3.result.content, /密钥无效|⚠/);
-    assert.match(r3.result.content, /识图：▰▰▰▰▰▰ 1\.2K \/ 1K/);
-    assert.match(r3.result.content, /\n  免费：▰▱▱▱▱▱ 14\.6G \/ 200G · 7%/);
+    assert.match(r3.result.content, /识图：1\.2K \/ 1K ▰▰▰▰▰▰/);
+    assert.match(r3.result.content, /\n    免费：14\.6G \/ 200G ▰▱▱▱▱▱ 7%/);
     assert.strictEqual(JSON.parse(store.get(cacheKey)).token, "tok-" + k1.json.client_email);
     console.log("✓ token 失效时自动重新签发");
   }
@@ -277,22 +277,22 @@ function tokenRoute(keys) {
     let s = ctx.summarizeBilling([row("Oregon", 150, 0), row("Iowa", 150, 0)]);
     assert.deepStrictEqual([s.stdGiB, s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [300, 0, 300, 0, 0]);
     s.usageEnd = 1;
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n  免费：▰▰▰▰▰▰ 300G \/ 200G · 150%\n/); // 账单为 0 时不标 ‼
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n    免费：300G \/ 200G ▰▰▰▰▰▰ 150%\n/); // 账单为 0 时不标 ‼
     // 截止时间按手机本地时间显示，取所有行中最晚的 usage_end
     const end = new Date(2026, 10, 10, 13, 0).getTime() / 1000;
     s = ctx.summarizeBilling([{ ...row("Oregon", 1, 0), usage_end: String(end) }, { ...row("Iowa", 1, 0), usage_end: String(end - 3600) }]);
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s, trafficGiB: 2.5 }, []), /^账号：x\n[^]*\n流量：2\.50G\n  免费：▰▱▱▱▱▱ 2\.00G \/ 200G · 1%\n  收费：0G · \$0\.00\n  账单截至 11-10 13:00$/);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s, trafficGiB: 2.5 }, []), /^x\n[^]*\n  流量：2\.50G\n    免费：2\.00G \/ 200G ▰▱▱▱▱▱ 1%\n    收费：0G · \$0\.00\n    账单截至 11-10 13:00$/);
     // 本月还没有账单数据：LEFT JOIN 返回一行全空，显示「暂无账单」而不是 0G
     s = ctx.summarizeBilling([{ service: null, sku: null, unit: null, qty: null, cost: null, free_credit: null, other_credit: null, currency: null, usage_end: null }]);
     assert.strictEqual(s.usageEnd, 0);
     const empty = ctx.renderAccount({ acc: { name: "x" }, billing: s, trafficGiB: 5.68 }, []);
-    assert.match(empty, /\n流量：5\.68G\n  免费 \/ 收费：本月暂无账单$/);
+    assert.match(empty, /\n  流量：5\.68G\n    免费 \/ 收费：本月暂无账单$/);
     assert.doesNotMatch(empty, /账单截至|G \/ 200G/);
     // 账单查询失败：流量下不显示免费 / 收费（问题在页脚提示）
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billingError: new Error("x"), trafficGiB: 0 }, []), /\n流量：0G$/);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billingError: new Error("x"), trafficGiB: 0 }, []), /\n  流量：0G$/);
     // 只有其他服务的记录（三类服务都没有）：有截止时间，流量为 0
     s = ctx.summarizeBilling([{ service: null, usage_end: String(end) }]);
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n  免费：▱▱▱▱▱▱ 0G \/ 200G · 0%\n  收费：0G · \$0\.00\n  账单截至 11-10 13:00$/);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n    免费：0G \/ 200G ▱▱▱▱▱▱ 0%\n    收费：0G · \$0\.00\n    账单截至 11-10 13:00$/);
     // 一个区域 250、另一个 50，有费用 → 只有超出的 50 收费
     s = ctx.summarizeBilling([row("Oregon", 250, 4.25), row("Iowa", 50, 0)]);
     assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [50, 250, 50, 4.25]);
@@ -304,21 +304,21 @@ function tokenRoute(keys) {
     assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [0, 120, 0, 1.2]);
     console.log("✓ 标准层出站按账单判断是否收费");
 
-    // 进度条 + 百分比：有用量至少 1 格、至少 1%；格数和百分比都向下取整；用完时填满并换成 ‼；数据缺失全空、无百分比
-    assert.strictEqual(ctx.meter(1, 1000, "v", false), "▰▱▱▱▱▱ v · 1%");
-    assert.strictEqual(ctx.meter(640, 1000, "v", false), "▰▰▰▱▱▱ v · 64%");
-    assert.strictEqual(ctx.meter(999, 1000, "v", false), "▰▰▰▰▰▱ v · 99%");
-    assert.strictEqual(ctx.meter(0, 1000, "v", false), "▱▱▱▱▱▱ v · 0%");
-    assert.strictEqual(ctx.meter(1200, 1000, "v", true), "▰▰▰▰▰▰ v ‼");
-    assert.strictEqual(ctx.meter(null, 1000, "v", false), "▱▱▱▱▱▱ v");
+    // 数值 + 进度条 + 百分比：有用量至少 1 格、至少 1%；格数和百分比都向下取整；用完时填满并换成 ‼；数据缺失全空、无百分比
+    assert.strictEqual(ctx.meter(1, 1000, "v", false), "v ▰▱▱▱▱▱ 1%");
+    assert.strictEqual(ctx.meter(640, 1000, "v", false), "v ▰▰▰▱▱▱ 64%");
+    assert.strictEqual(ctx.meter(999, 1000, "v", false), "v ▰▰▰▰▰▱ 99%");
+    assert.strictEqual(ctx.meter(0, 1000, "v", false), "v ▱▱▱▱▱▱ 0%");
+    assert.strictEqual(ctx.meter(1200, 1000, "v", true), "v ▰▰▰▰▰▰ ‼");
+    assert.strictEqual(ctx.meter(null, 1000, "v", false), "v ▱▱▱▱▱▱");
     // API 用量刚好等于额度也算用完
-    assert.strictEqual(ctx.apiLine({ quota: { "vision.googleapis.com/document_text_detection_requests": 1000 } }, "vision", "识图"), "识图：▰▰▰▰▰▰ 1K / 1K ‼");
+    assert.strictEqual(ctx.apiLine({ quota: { "vision.googleapis.com/document_text_detection_requests": 1000 } }, "vision", "识图"), "识图：1K / 1K ▰▰▰▰▰▰ ‼");
 
     // 用量为 0 的 API 也显示，进度条全空
     const zeroQuota = { "vision.googleapis.com/document_text_detection_requests": 0, "translate.googleapis.com/default": 0 };
-    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: zeroQuota, trafficGiB: 0 }, []), "账号：x\n识图：▱▱▱▱▱▱ 0 / 1K · 0%\n翻译：▱▱▱▱▱▱ 0 / 500K · 0%\n流量：0G");
+    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: zeroQuota, trafficGiB: 0 }, []), "x\n  识图：0 / 1K ▱▱▱▱▱▱ 0%\n  翻译：0 / 500K ▱▱▱▱▱▱ 0%\n  流量：0G");
     const someQuota = { ...zeroQuota, "translate.googleapis.com/default": 312000 };
-    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: someQuota, trafficGiB: 0 }, []), "账号：x\n识图：▱▱▱▱▱▱ 0 / 1K · 0%\n翻译：▰▰▰▱▱▱ 312K / 500K · 62%\n流量：0G");
+    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: someQuota, trafficGiB: 0 }, []), "x\n  识图：0 / 1K ▱▱▱▱▱▱ 0%\n  翻译：312K / 500K ▰▰▰▱▱▱ 62%\n  流量：0G");
 
     // 图标颜色：正常绿；用量 ≥ 80% / 有费用 / 数据缺失橙；超额 / 认证失败红
     s = ctx.summarizeBilling([row("Oregon", 10, 0)]);
@@ -344,23 +344,23 @@ function tokenRoute(keys) {
     const big = ctx.summarizeBilling([row("Oregon", 1999, 299.99)]);
     big.usageEnd = end;
     fit(ctx.renderAccount({ acc: { name: "x" }, billing: big, trafficGiB: 9999 }, []));
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 99.97 }, []), /\n流量：100G$/); // 进位后不显示成 100.0G
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 9.996 }, []), /\n流量：10\.0G$/);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 99.97 }, []), /\n  流量：100G$/); // 进位后不显示成 100.0G
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 9.996 }, []), /\n  流量：10\.0G$/);
     console.log("✓ 进度条、零用量显示、图标状态色");
 
-    // 参数开关：bar=0 不显示进度条，percent=0 不显示百分比，‼ 始终显示；两个都关时数值紧跟标签
+    // 参数开关：bar=0 不显示进度条（百分比前加「· 」），percent=0 不显示百分比，‼ 始终显示
     const q = { "vision.googleapis.com/document_text_detection_requests": 1200, "translate.googleapis.com/default": 312000 };
     const lines = async (argument) => {
       const { ctx: c } = await run({ accounts: [], routes: [], argument });
       return c.renderAccount({ acc: { name: "x" }, quota: q }, []).split("\n").slice(1, 3).join(" | ");
     };
-    assert.strictEqual(await lines(""), "识图：▰▰▰▰▰▰ 1.2K / 1K ‼ | 翻译：▰▰▰▱▱▱ 312K / 500K · 62%");
-    assert.strictEqual(await lines("bar=0"), "识图：1.2K / 1K ‼ | 翻译：312K / 500K · 62%");
-    assert.strictEqual(await lines("percent=0"), "识图：▰▰▰▰▰▰ 1.2K / 1K ‼ | 翻译：▰▰▰▱▱▱ 312K / 500K");
-    assert.strictEqual(await lines("bar=0&percent=0&notify=1"), "识图：1.2K / 1K ‼ | 翻译：312K / 500K");
-    assert.strictEqual(await lines("bar=1&percent=true"), "识图：▰▰▰▰▰▰ 1.2K / 1K ‼ | 翻译：▰▰▰▱▱▱ 312K / 500K · 62%");
+    assert.strictEqual(await lines(""), "  识图：1.2K / 1K ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱ 62%");
+    assert.strictEqual(await lines("bar=0"), "  识图：1.2K / 1K ‼ |   翻译：312K / 500K · 62%");
+    assert.strictEqual(await lines("percent=0"), "  识图：1.2K / 1K ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱");
+    assert.strictEqual(await lines("bar=0&percent=0&notify=1"), "  识图：1.2K / 1K ‼ |   翻译：312K / 500K");
+    assert.strictEqual(await lines("bar=1&percent=true"), "  识图：1.2K / 1K ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱ 62%");
     const { ctx: off } = await run({ accounts: [], routes: [], argument: "bar=0&percent=0" });
-    assert.strictEqual(off.renderAccount({ acc: { name: "x" }, quota: null }, []).split("\n")[1], "识图：? / 1K"); // 数据缺失
+    assert.strictEqual(off.renderAccount({ acc: { name: "x" }, quota: null }, []).split("\n")[1], "  识图：? / 1K"); // 数据缺失
     console.log("✓ bar / percent 参数开关");
   }
 
@@ -395,7 +395,7 @@ function tokenRoute(keys) {
   // 5. 密钥未配置时给出可读错误
   {
     const res = await run({ accounts: [{ name: "空", billingDataset: "a.b", key: {} }], routes });
-    assert.match(res.result.content, /账号：空\n✗ 服务账号密钥未配置/);
+    assert.match(res.result.content, /空\n  ✗ 服务账号密钥未配置/);
     console.log("✓ 未配置提示");
   }
   console.log("\n全部通过");
