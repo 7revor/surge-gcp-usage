@@ -84,6 +84,7 @@ gcloud billing projects describe $PROJECT --format="value(billingEnabled)"
 echo "== 启用 API / 建数据集 =="
 gcloud services enable bigquery.googleapis.com monitoring.googleapis.com --project=$PROJECT
 bq ls --project_id=$PROJECT | grep -qw billing_export || bq --project_id=$PROJECT --location=US mk --dataset $PROJECT:billing_export
+bq update --default_partition_expiration 7776000 $PROJECT:billing_export   # 新建的分区表默认只保留 90 天
 
 echo "== 服务账号与授权 =="
 gcloud iam service-accounts describe surge-usage@$PROJECT.iam.gserviceaccount.com --project=$PROJECT >/dev/null 2>&1 \
@@ -94,7 +95,9 @@ for ROLE in roles/monitoring.viewer roles/bigquery.jobUser roles/bigquery.dataVi
 done
 ```
 
-预期输出：`True`、`Dataset ... successfully created`（已存在时不输出）、3 行「已授权」。
+预期输出：`True`、`Dataset ... successfully created`（已存在时不输出）、`Dataset ... successfully updated`、3 行「已授权」。
+
+数据集的默认分区过期设为 90 天（7776000 秒），账单导出之后建的表会沿用这个设置。为了保险，步骤 I 还会逐张确认。
 
 - 结算显示 `False`：先在控制台把这个项目关联到结算账号。否则 BigQuery 处于沙盒模式，表 60 天后会自动删除。
 - 如果 vision/translate 还在其他项目里调用，给每个这样的项目补授监控权限：
@@ -263,6 +266,35 @@ node scripts/install-surge.js --conf dconf/General.dconf             # 正式安
 
 ---
 
+## 步骤 I：账单表只保留 90 天（用户，每个账号的 Cloud Shell，表出现后）
+
+为什么要设：账单导出会一直追加数据。面板每次查询都要扫描整张表里用到的那几列，表越大扫描越多。存储和查询都按量计费，虽然以个人用量很难超出免费额度，但保留 90 天可以让两者都不再增长。控制台「结算 → 报表」不读这张表，不受影响。
+
+Agent 先检查哪些账号还没设置：
+
+```bash
+node scripts/check-retention.js      # 只读；全部 ✓ 就跳过这一步
+```
+
+对每个显示 ✗ 的账号，把 `PROJECT` 填好发给用户，在**该账号的** Cloud Shell 里执行：
+
+```bash
+PROJECT=<账单数据项目ID>
+DS=$PROJECT:billing_export
+bq update --default_partition_expiration 7776000 $DS
+for T in $(bq ls --max_results=1000 $DS | awk '$1 ~ /^gcp_billing_export_/ {print $1}'); do
+  bq update --time_partitioning_expiration 7776000 $DS.$T
+done
+```
+
+预期输出：`Dataset '...:billing_export' successfully updated.`，以及每张账单表一行 `Table '...' successfully updated.`。用户贴回后，Agent 重新运行 `check-retention.js`，这个账号应全部显示 ✓。
+
+- 只设置**分区过期**，不要设置「表过期时间」。后者到期会删掉整张表。
+- 分区按写入日期划分。迟到的数据会写进新的分区，所以面板查询本月数据不受影响。
+- 没有 `Table ... updated` 这一行：说明表还没生成，等几个小时后再执行一次。
+
+---
+
 ## 故障排查（都是实际遇到过的情况）
 
 | 现象 | 原因 | 处理 |
@@ -276,6 +308,7 @@ node scripts/install-surge.js --conf dconf/General.dconf             # 正式安
 | `Billing account for project ... is not found` | 对没有关联结算的项目启用了 API | 和本方案无关，忽略 |
 | `⚠ 账单：数据未就绪` | 还没开启账单导出，或开启不到几小时 | 确认步骤 E 已完成，等待 |
 | 面板上的错误被截短，看不出原因 | 面板一行放不下 | 完整错误在 Surge 的脚本日志里，以 `[gcp-usage]` 开头；`live.js` 也会打印 |
+| `check-retention.js` 显示 ✗，但用户说已经设置过 | 在别的账号的 Cloud Shell 里执行了，或者 `PROJECT` 填错了 | 在 Cloud Shell 里执行 `gcloud config get-value account`，确认登录的账号对应这个项目后重新执行步骤 I |
 | `⚠ 调用量：无权限`（`live.js` 显示 HTTP 403） | `projects` 里的某个项目没有给服务账号授予 `roles/monitoring.viewer` | 按步骤 B 补授权限 |
 | `⚠ 账单：无权限`（`bigquery.jobs.create` 被拒绝） | 账单数据项目缺少 `roles/bigquery.jobUser` | 按步骤 B 补授权限 |
 | `✗ 校验失败：Google 上找不到该 private_key_id` | 密钥已在控制台被删除 | 重新执行步骤 C 和 D（导入时加 `--force`） |
@@ -286,7 +319,7 @@ node scripts/install-surge.js --conf dconf/General.dconf             # 正式安
 ## 日常维护
 
 - **修改了 `gcp-usage.js`**：先跑 `node test/harness.js && node test/tools.js && node test/live.js`，再重新执行步骤 G。Surge 里的脚本是生成出来的副本，不会自动同步。
-- **新增账号**：对新账号走一遍步骤 A–G。导入后 `accounts.local.json` 会自动追加，然后重新执行 `install-surge.js`。
+- **新增账号**：对新账号走一遍步骤 A–G，账单表出现后再做步骤 I。导入后 `accounts.local.json` 会自动追加，然后重新执行 `install-surge.js`。
 - **轮换密钥**：
   1. 用户在 Cloud Shell 生成新密钥（步骤 C）。
   2. Agent 执行 `import-key.js <账号名> ... --force`，然后重新执行 `install-surge.js`。

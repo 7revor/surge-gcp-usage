@@ -32,6 +32,7 @@
 | `gcp-usage.js` | Surge 脚本源码。`// <config>` 区块是占位符，由安装脚本填入真实配置 |
 | `scripts/import-key.js` | 从下载的文件或剪贴板导入密钥，修复断行，校验后登记账号 |
 | `scripts/verify-keys.js` | 校验所有密钥是否仍然有效 |
+| `scripts/check-retention.js` | 只读检查各账号账单数据集和表是否设置了 90 天分区过期 |
 | `scripts/install-surge.js` | 生成配置好的脚本，安装到 Surge 并登记 `[Script]` 和 `[Panel]` |
 | `scripts/lib.js` | 上面几个脚本共用的函数，包括在 Node 中模拟 Surge 运行时 |
 | `test/harness.js` | 离线测试：签名、分类、多账号、时区 |
@@ -45,6 +46,7 @@
 ```bash
 node test/harness.js && node test/tools.js   # 离线测试
 node scripts/verify-keys.js                  # 校验密钥
+node scripts/check-retention.js              # 检查账单表 90 天保留期
 node test/live.js                            # 用真实接口跑一次
 node scripts/install-surge.js --conf dconf/General.dconf   # 安装或更新 Surge 脚本
 ```
