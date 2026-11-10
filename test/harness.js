@@ -188,6 +188,7 @@ function tokenRoute(keys) {
     { name: "副号", billingDataset: "proj-b.billing_export", projects: [], key: k2.json },
   ];
   const r = await run({ accounts, routes, argument: "notify=1" });
+  assert.ok(!r.calls.some((x) => /request_count/.test(decodeURIComponent(x.url))), "默认配置不显示调用次数，不应再查询 request_count");
   console.log("\n--- 面板输出 ---\n" + r.result.title + "\n" + r.result.content + "\n----------------\n");
 
   assert.match(bqSql, /`proj-b\.billing_export\.gcp_billing_export_v1_\*`/);
@@ -195,12 +196,12 @@ function tokenRoute(keys) {
   const c = r.result.content;
   assert.strictEqual(r.result.style, "info");
   assert.strictEqual(r.result.icon, undefined);
-  assert.match(c, /▸ 主号\n‼ Vision 1,234 次 · 1,200\/1,000\n/); // 只统计文档识别（label_detection 不计），超额加 ‼
-  assert.match(c, /Translate 56 次 · 5,633\/50万字符\n/); // 字符数来自配额指标，不用账单
-  assert.match(c, /Cost Vision \$0\.75\nTraffic\nFree 14\.6\/200 GiB\nPaid 0\.01 GiB\/\$0\.0004\n/); // Free 只算标准层出站；Paid 为对等互连
-  assert.match(c, /▸ 副号\nVision \? 次 · \?\/1,000\nTranslate \? 次 · \?\/50万字符\n/);
-  assert.match(c, /Translate \? 次 · \?\/50万字符\nTraffic\n‼ Free 231\/200 GiB\nPaid 30\.5 GiB\/\$2\.60\n/); // 标准出站超额计入 Paid
-  assert.match(c, /\n\n⚠ 调用量：无权限（副号）\n账单截至 \d\d-\d\d \d\d:\d\d$/);
+  assert.match(c, /▸ 主号\n‼ Vision 1,200\/1,000\n/); // 只统计文档识别（label_detection 不计），超额加 ‼；不显示调用次数
+  assert.match(c, /Translate 5,633\/50万字符\n/); // 字符数来自配额指标，不用账单
+  assert.match(c, /Cost Vision \$0\.75\nTraffic Free 14\.6\/200 GiB\nTraffic Paid 0\.01 GiB\/\$0\.0004\n/); // Free 只算标准层出站；Paid 为对等互连
+  assert.match(c, /▸ 副号\nVision \?\/1,000\nTranslate \?\/50万字符\n/);
+  assert.match(c, /Translate \?\/50万字符\n‼ Traffic Free 231\/200 GiB\nTraffic Paid 30\.5 GiB\/\$2\.60\n/); // 标准出站超额计入 Paid
+  assert.match(c, /\n\n⚠ 用量：无权限（副号）\n账单截至 \d\d-\d\d \d\d:\d\d$/);
   for (const line of (r.result.title + "\n" + c).split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
   assert.ok(r.notified, "notify=1 应推送通知");
   console.log("✓ 双账号流程、流量分类、部分失败显示");
@@ -215,7 +216,7 @@ function tokenRoute(keys) {
     assert.ok(cached.token && cached.exp > Date.now() / 1000);
     const r2 = await run({ accounts: one, routes, store: r1.store });
     assert.strictEqual(r2.calls.filter((x) => /oauth2/.test(x.url)).length, 0, "第二次运行应使用缓存的 token");
-    assert.match(r2.result.content, /Vision 1,234 次/);
+    assert.match(r2.result.content, /Vision 1,200\/1,000/);
     console.log("✓ token 缓存生效");
 
     // 缓存的 token 已失效（401）：丢弃缓存，重新签发后重试一次
@@ -227,8 +228,8 @@ function tokenRoute(keys) {
     const r3 = await run({ accounts: one, routes: reject401, store });
     assert.strictEqual(r3.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
     assert.doesNotMatch(r3.result.content, /密钥无效|⚠/);
-    assert.match(r3.result.content, /Vision 1,234 次/);
-    assert.match(r3.result.content, /Free 14\.6\/200 GiB/);
+    assert.match(r3.result.content, /Vision 1,200\/1,000/);
+    assert.match(r3.result.content, /Traffic Free 14\.6\/200 GiB/);
     assert.strictEqual(JSON.parse(store.get(cacheKey)).token, "tok-" + k1.json.client_email);
     console.log("✓ token 失效时自动重新签发");
   }
@@ -249,7 +250,7 @@ function tokenRoute(keys) {
     // 两个区域各 150：合计超过 200，但账单为 0 → 全部免费
     let s = ctx.summarizeBilling([row("Oregon", 150, 0), row("Iowa", 150, 0)]);
     assert.deepStrictEqual([s.stdGiB, s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [300, 0, 300, 0, 0]);
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\nFree 300\/200 GiB\n/); // 账单为 0 时不标 ‼
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\nTraffic Free 300\/200 GiB\n/); // 账单为 0 时不标 ‼
     // 一个区域 250、另一个 50，有费用 → 只有超出的 50 收费
     s = ctx.summarizeBilling([row("Oregon", 250, 4.25), row("Iowa", 50, 0)]);
     assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [50, 250, 50, 4.25]);

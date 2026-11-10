@@ -63,7 +63,7 @@ async function main() {
   // 面板上的错误会被截短，完整内容写进 Surge 的脚本日志
   for (const b of blocks) {
     if (b.error) log(`${b.acc.name} 认证: ${fullErr(b.error)}`);
-    if (b.monitorError) log(`${b.acc.name} 调用量: ${fullErr(b.monitorError)}`);
+    if (b.monitorError) log(`${b.acc.name} 用量: ${fullErr(b.monitorError)}`);
     if (b.billingError) log(`${b.acc.name} 账单: ${fullErr(b.billingError)}`);
   }
   return {
@@ -89,7 +89,10 @@ async function queryWithToken(acc, period, now, token) {
   const [mon, bill] = await Promise.all([
     Promise.all(
       projects.map((p) =>
-        Promise.all([apiRequestCounts(token, p, period.start, now), quotaUsage(token, p, period.start, now)])
+        Promise.all([
+          needCallCounts() ? apiRequestCounts(token, p, period.start, now) : {},
+          quotaUsage(token, p, period.start, now),
+        ])
       )
     )
       .then((list) => ({ ok: { counts: mergeCounts(list.map((x) => x[0])), quota: mergeCounts(list.map((x) => x[1])) } }))
@@ -113,6 +116,11 @@ async function queryWithToken(acc, period, now, token) {
 // ============================================================
 
 const SERVICES = { vision: "vision.googleapis.com", translate: "translate.googleapis.com" };
+
+/** 只有某个 API 按调用次数统计（basis: "calls"）或没设免费额度时，才需要查询调用次数 */
+function needCallCounts() {
+  return Object.keys(SERVICES).some((k) => !(FREE_QUOTA[k] && FREE_QUOTA[k].limit) || FREE_QUOTA[k].basis === "calls");
+}
 
 function apiRequestCounts(token, project, start, end) {
   const filter =
@@ -308,7 +316,7 @@ function renderAccount(b, issues) {
   const name = b.acc.name;
   const lines = [`▸ ${name}`];
   if (b.error) return lines.concat(`✗ ${shortErr(b.error)}`).join("\n");
-  if (b.monitorError) issues.push({ scope: "调用量", msg: shortErr(b.monitorError), name });
+  if (b.monitorError) issues.push({ scope: "用量", msg: shortErr(b.monitorError), name });
   if (b.billingError) issues.push({ scope: "账单", msg: shortErr(b.billingError), name });
 
   lines.push(apiLine(b, "vision", "Vision"));
@@ -323,19 +331,18 @@ function renderAccount(b, issues) {
     if (costs.length) lines.push(`Cost ${costs.join(" · ")}`);
 
     // Free：标准层出站 / 免费额度，账单确认有超额收费时行首加 ‼；Paid：收费流量 / 流量费用
-    const free = `Free ${fmtG(bill.stdGiB)}/${STANDARD_FREE_GIB} GiB`;
-    lines.push("Traffic", bill.stdOverGiB > 0 ? "‼ " + free : free);
-    lines.push(`Paid ${gib(bill.paidGiB)}/${money(bill.paidCost, bill.currency)}`);
+    const free = `Traffic Free ${fmtG(bill.stdGiB)}/${STANDARD_FREE_GIB} GiB`;
+    lines.push(bill.stdOverGiB > 0 ? "‼ " + free : free);
+    lines.push(`Traffic Paid ${gib(bill.paidGiB)}/${money(bill.paidCost, bill.currency)}`);
   }
   return lines.join("\n");
 }
 
-/** 例：「Vision 20 次 · 19/1,000」「Translate 84 次 · 5,633/50万字符」，超额时行首加 ‼ */
+/** 例：「Vision 19/1,000」「Translate 5,633/50万字符」，超额时行首加 ‼；没设额度时显示「Vision 20 次」 */
 function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
   const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
-  let line = `${label} ${callsN === null ? "?" : fmtInt(callsN)} 次`;
-  if (!q.limit) return line;
+  if (!q.limit) return `${label} ${callsN === null ? "?" : fmtInt(callsN)} 次`;
 
   let used = null;
   if (q.basis === "quota") {
@@ -345,7 +352,7 @@ function apiLine(b, key, label) {
   } else {
     used = callsN;
   }
-  line += ` · ${used === null ? "?" : fmtBig(used)}/${fmtBig(q.limit)}${q.unit || ""}`;
+  const line = `${label} ${used === null ? "?" : fmtBig(used)}/${fmtBig(q.limit)}${q.unit || ""}`;
   return used !== null && used > q.limit ? "‼ " + line : line;
 }
 

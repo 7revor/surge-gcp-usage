@@ -233,9 +233,9 @@ node test/live.js                # 用真实接口跑一次面板
 
 `live.js` 的预期输出：
 
-- 每个账号都有 `Vision N 次 · 已用/1,000` 和 `Translate N 次 · 已用/50万字符` 两行。这两行的数据来自 Monitoring，开启账单导出前就能看到。
+- 每个账号都有 `Vision 已用/1,000` 和 `Translate 已用/50万字符` 两行。这两行的数据来自 Monitoring，开启账单导出前就能看到。
 - 导出表还没生成时，底部会显示「⚠ 账单：数据未就绪」，这是正常的。
-- 表生成之后，会出现「Traffic」「Free」「Paid」「账单截至」几行。
+- 表生成之后，会出现「Traffic Free」「Traffic Paid」「账单截至」几行。
 
 ---
 
@@ -312,10 +312,10 @@ done
 | `⚠ 账单：数据未就绪` | 还没开启账单导出，或开启不到几小时 | 确认步骤 E 已完成，等待 |
 | 面板上的错误被截短，看不出原因 | 面板一行放不下 | 完整错误在 Surge 的脚本日志里，以 `[gcp-usage]` 开头；`live.js` 也会打印 |
 | `check-retention.js` 显示 ✗，但用户说已经设置过 | 在别的账号的 Cloud Shell 里执行了，或者 `PROJECT` 填错了 | 在 Cloud Shell 里执行 `gcloud config get-value account`，确认登录的账号对应这个项目后重新执行步骤 I |
-| `⚠ 调用量：无权限`（`live.js` 显示 HTTP 403） | `projects` 里的某个项目没有给服务账号授予 `roles/monitoring.viewer` | 按步骤 B 补授权限 |
+| `⚠ 用量：无权限`（`live.js` 显示 HTTP 403） | `projects` 里的某个项目没有给服务账号授予 `roles/monitoring.viewer` | 按步骤 B 补授权限 |
 | `⚠ 账单：无权限`（`bigquery.jobs.create` 被拒绝） | 账单数据项目缺少 `roles/bigquery.jobUser` | 按步骤 B 补授权限 |
 | `✗ 校验失败：Google 上找不到该 private_key_id` | 密钥已在控制台被删除 | 重新执行步骤 C 和 D（导入时加 `--force`） |
-| 几个账号的 Vision/Translate 次数相同 | 多半是同一个客户端在轮流使用这几个账号，不是 bug | 用每天的原始数据核对：`timeSeries.list` 设置 `alignmentPeriod=86400s` |
+| 几个账号的 Vision/Translate 用量相同 | 多半是同一个客户端在轮流使用这几个账号，不是 bug | 用每天的原始数据核对：`timeSeries.list` 设置 `alignmentPeriod=86400s` |
 
 ---
 
