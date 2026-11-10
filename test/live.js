@@ -1,30 +1,14 @@
-// 用真实 GCP 接口运行脚本：node test/live.js accounts.json
-// accounts.json: [{ "name": "...", "billingDataset": "p.d", "projects": [], "keyFile": "/path/key.json" }]
+#!/usr/bin/env node
+// 用真实 GCP 接口运行脚本（不修改任何文件）。
+// 用法：node test/live.js [--accounts accounts.local.json]
 "use strict";
-const fs = require("fs");
-const path = require("path");
-const vm = require("vm");
+const { loadAccounts, buildSurgeScript, runInSurgeShim, parseFlags, DEFAULT_ACCOUNTS } = require("../scripts/lib");
 
-const accounts = JSON.parse(fs.readFileSync(process.argv[2], "utf8")).map((a) => ({
-  ...a,
-  key: JSON.parse(fs.readFileSync(a.keyFile.replace(/^~/, process.env.HOME), "utf8")),
-}));
-const src = fs
-  .readFileSync(path.join(__dirname, "..", "gcp-usage.js"), "utf8")
-  .replace(/\/\/ <config>[\s\S]*?\/\/ <\/config>/, "const ACCOUNTS = __ACCOUNTS__;");
-
-const http = (method) => (opts, cb) => {
-  fetch(opts.url, { method, headers: opts.headers, body: opts.body, signal: AbortSignal.timeout((opts.timeout || 30) * 1000) })
-    .then(async (r) => cb(null, { status: r.status, headers: Object.fromEntries(r.headers) }, await r.text()))
-    .catch((e) => cb(String(e)));
-};
-const store = new Map();
-const ctx = vm.createContext({
-  __ACCOUNTS__: accounts,
-  $httpClient: { get: http("GET"), post: http("POST") },
-  $persistentStore: { read: (k) => store.get(k) ?? null, write: (v, k) => (store.set(k, v), true) },
-  $notification: { post: () => {} },
-  $argument: "",
-  $done: (v) => console.log(v.title + "\n" + v.content),
+(async () => {
+  const f = parseFlags(process.argv.slice(2));
+  const panel = await runInSurgeShim(buildSurgeScript(loadAccounts(f.accounts || DEFAULT_ACCOUNTS)));
+  console.log(`${panel.title}  [icon=${panel.icon}]\n${panel.content}`);
+})().catch((e) => {
+  console.error("✗ " + e.message);
+  process.exit(1);
 });
-vm.runInContext(src, ctx);

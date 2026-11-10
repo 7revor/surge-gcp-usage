@@ -1,0 +1,9 @@
+[
+  {
+    "name": "main",
+    "billingDataset": "my-project-id.billing_export",
+    "projects": [],
+    "keyFile": "keys/gcp-key-main.json",
+    "billingAccount": "000000-000000-000000"
+  }
+]

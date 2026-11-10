@@ -1,3 +1,8 @@
-key*.json
+# 密钥与本地账号配置：绝不提交
+keys/
+*.local.json
 *.local.js
+gcp-key-*.json
+
+.claude/
 .DS_Store

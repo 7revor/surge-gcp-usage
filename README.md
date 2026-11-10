@@ -1,20 +1,10 @@
 # surge-gcp-usage
 
-用一个 Surge 面板脚本查询多个 GCP 账号的本月用量：
-
-| 项目 | 数据来源 | 时效 |
-|---|---|---|
-| Vision / Translate 调用次数 | Cloud Monitoring `serviceruntime.googleapis.com/api/request_count` | 近实时 |
-| Vision / Translate 计费量与净费用 | BigQuery 账单导出 | 延迟数小时 |
-| Compute Engine 免费/收费流量 | BigQuery 账单导出（按 SKU） | 延迟数小时 |
-
-Google 没有公开 API 能直接读取控制台的「账单报表」，按 SKU 统计用量只能通过 BigQuery 账单导出来查。
-
-面板效果：
+用一个 Surge 面板脚本，分账号查看多个 GCP 账号的本月用量。
 
 ```
 GCP 用量 · 11月 · 12:51
-【主号】
+【main】
 Vision 1,234 次 · 计费 1,530 · $0.75
 Translate 56 次 · 计费 123,456
 免费流量 29.90 GiB（标准出站 14.59/200）
@@ -22,6 +12,20 @@ Translate 56 次 · 计费 123,456
   · Carrier Peering 出站 · Americas 0.01 GiB
 账单截至 11-10 13:00
 ```
+
+> **部署或新增账号**：按 [`docs/SETUP.md`](docs/SETUP.md) 一步步操作。这份手册是写给 Agent 用来引导用户的，每一步都有预期输出、分支判断和故障排查。Agent 的工作规则见 [`AGENTS.md`](AGENTS.md)。
+
+## 数据来源
+
+| 显示项 | 数据来源 | 时效 |
+|---|---|---|
+| Vision / Translate 调用次数 | Cloud Monitoring `serviceruntime.googleapis.com/api/request_count` | 近实时 |
+| Vision / Translate 计费量与净费用 | BigQuery 账单导出（标准使用费用） | 延迟数小时 |
+| Compute Engine 免费/收费流量 | BigQuery 账单导出，按 SKU 汇总 | 延迟数小时 |
+
+Google 没有公开 API 能直接读取控制台的「账单报表」。Cloud Billing API 只能查账号信息和价目表，Budget API 只能查预算。所以按 SKU 统计用量，只能通过 BigQuery 账单导出来查。
+
+认证用的是每个账号各自的只读服务账号：角色为 `monitoring.viewer`、`bigquery.jobUser` 和 `bigquery.dataViewer`，密钥为 JSON 格式。Surge 没有 WebCrypto，所以脚本用纯 JS（BigInt）实现 RS256 签名，换来的 token 缓存约 1 小时。
 
 ## 流量分类规则
 
@@ -37,96 +41,52 @@ Translate 56 次 · 计费 123,456
 | `Network Data Transfer Out via Carrier Peering Network - Americas Based` | **收费**。这是发往 CDN Interconnect 合作伙伴的出站流量（例如 Cloudflare），不享受标准层的 200 GiB 免费额度 |
 | 其他出站 SKU | 扣除免费层抵扣后仍有费用的算收费，否则算免费 |
 
-「收费流量」后面的金额是原价减去免费层抵扣（`FREE_TIER`），不扣赠金和促销抵扣，表示这部分流量本身的价格。Vision / Translate 后面的金额是扣掉所有抵扣后的净费用，为 0 时不显示。
+金额的含义：
+- 「收费流量」后面的金额：原价减去免费层抵扣（`FREE_TIER`），不扣赠金和促销抵扣，表示这部分流量本身的价格。
+- Vision / Translate 后面的金额：扣掉所有抵扣后的净费用，为 0 时不显示。
 
-## 需要你做的事（每个 GCP 账号各做一遍）
+## 每次刷新的请求与费用
 
-### 1. 在 Cloud Shell 创建服务账号和数据集
+以下按「一个账号刷新一次」计算。每个结算账号的免费额度各自独立。
 
-登录对应的 Google 账号，打开 [Cloud Shell](https://shell.cloud.google.com)，然后执行：
+| 请求 | 频率 | 计费 |
+|---|---|---|
+| `oauth2.googleapis.com/token` | 约 55 分钟一次，其余时间用缓存 | 免费 |
+| Monitoring `timeSeries.list` | 每个项目 1 次，每次返回 2 条时间序列 | 每个结算账号每月前 100 万条免费，超出部分 $0.50/百万条 |
+| BigQuery `jobs.query` | 1 次 | 每月前 1 TiB 免费。每次查询最少按 10 MB 计，而且通配查询不会命中结果缓存 |
 
-```bash
-PROJECT=你的项目ID          # 用来放账单数据的项目，建议用 VM 所在的项目
+账单导出本身免费，导出表的存储也在 BigQuery 每月 10 GiB 的免费额度内。每天刷新一次的话，一个月约 300 MB 查询量、60 条时间序列，都远低于免费额度。
 
-gcloud services enable bigquery.googleapis.com monitoring.googleapis.com --project=$PROJECT
+## 面板刷新机制
 
-# 账单数据集：选 US 多区域，才会回填本月和上月的数据
-bq --location=US mk --dataset $PROJECT:billing_export
+Surge 面板**不会在后台刷新**，脚本只在两种情况下运行：
 
-# 只读服务账号
-gcloud iam service-accounts create surge-usage --display-name="Surge usage reader" --project=$PROJECT
-SA=surge-usage@$PROJECT.iam.gserviceaccount.com
-for ROLE in roles/monitoring.viewer roles/bigquery.jobUser roles/bigquery.dataViewer; do
-  gcloud projects add-iam-policy-binding $PROJECT --member=serviceAccount:$SA --role=$ROLE --condition=None -q >/dev/null
-done
+- 点面板上的刷新按钮（`$trigger=button`）：每次都会重新查询。
+- 打开面板所在页面时（`$trigger=auto-interval`）：iOS 是策略组选择页，Mac 是菜单栏的 Panels 子菜单。距上次刷新超过 `update-interval` 秒，才会自动刷新。
 
-# 生成密钥，复制输出的 JSON 后删除文件
-gcloud iam service-accounts keys create key.json --iam-account=$SA
-cat key.json && rm key.json
-```
+默认的 `update-interval=86400`，也就是自动刷新最多一天一次。
 
-如果 Vision / Translate 在其他项目里调用，要给该项目也授予监控只读权限，并把项目 ID 填进配置的 `projects` 里：
-
-```bash
-gcloud projects add-iam-policy-binding 其他项目ID --member=serviceAccount:$SA --role=roles/monitoring.viewer --condition=None
-```
-
-### 2. 在控制台开启账单导出（只能在网页上操作）
-
-依次进入：结算 → 结算数据导出 → BigQuery Export → **标准使用费用** → 修改设置。项目选 `$PROJECT`，数据集选 `billing_export`，然后保存。
-
-- 开启后要等几个小时才有数据，回填上月的数据最长要 5 天。
-- 只需要开「标准使用费用」，「详细使用费用」不用开。
-- BigQuery 查询费用可以忽略：每次查询最少按 10 MB 计费，每小时刷新一次一个月约 7 GB，远低于每月 1 TB 的免费额度。
-
-### 3. 填写配置
-
-复制一份 `gcp-usage.js` 到 Surge 配置目录下的 `js/` 子目录（iCloud Drive/Surge/js）。然后编辑 `// <config>` 区块，每个账号写一项：
-
-```js
-const ACCOUNTS = [
-  {
-    name: "主号",
-    billingDataset: "my-project.billing_export",
-    projects: [],          // 留空表示只统计服务账号所在的项目
-    key: { /* 粘贴 key.json 的完整内容 */ },
-  },
-  { name: "副号", billingDataset: "...", projects: [], key: { ... } },
-];
-```
-
-**填好密钥的这份文件不要提交到任何仓库**，也不要放到公开的规则仓库里。
-
-### 4. Surge 配置
+可选：在 `[Script]` 段加一行定时推送通知，比如每天 9 点：
 
 ```ini
-[Script]
-gcp-usage = type=generic,timeout=60,script-path=js/gcp-usage.js
-# 可选：每天 9 点推送一次
 gcp-usage-notify = type=cron,cronexp="0 9 * * *",script-path=js/gcp-usage.js,timeout=60,argument=notify=1
-
-[Panel]
-GCP = title=GCP 用量,content=加载中,style=info,script-name=gcp-usage,update-interval=86400
 ```
-
-面板不会在后台刷新，只在两种情况下运行脚本：
-
-- 点面板上的刷新按钮：每次都会重新查询。
-- 打开面板所在页面时（iOS 是策略组选择页，Mac 是菜单栏的 Panels 子菜单），如果距上次刷新已超过 `update-interval` 秒，就自动刷新一次。
-
-`86400` 表示自动刷新最多一天一次。
 
 ## 注意
 
-- **调用次数和计费量不是一回事**。Monitoring 统计的是请求数，失败的请求也算在内。Vision 按「图片数 × 功能数」计费，每个功能每月前 1000 个单位免费。Translate 按字符计费。
+- **调用次数和计费量不是一回事**：
+  - Monitoring 统计的是请求数，失败的请求也算在内。
+  - Vision 按「图片数 × 功能数」计费，每个功能每月前 1000 个单位免费。
+  - Translate 按字符计费。
 - 账单月按太平洋时间划分，和控制台报表一致。调用次数也从太平洋时间当月 1 日 0 点开始统计。
-- access token 缓存在 `$persistentStore` 中，有效期约 1 小时。
-- 服务账号只有只读权限（`monitoring.viewer`、`bigquery.dataViewer`、`bigquery.jobUser`）。如果密钥泄露，影响仅限于读取该项目的监控数据和 BigQuery 数据。如果要撤销，在 IAM → 服务账号 → 密钥里删除对应密钥即可。
+- 如果密钥泄露，影响仅限于读取对应项目的监控数据和 BigQuery 数据。撤销方法：在 IAM → 服务账号 → `surge-usage` → 密钥里删除对应密钥。
 
-## 测试
+## 开发与测试
 
 ```bash
-node test/harness.js
+node test/harness.js   # 离线测试：RS256 签名与 Node crypto 一致、多账号流程、流量分类、部分失败显示、太平洋时间账单月
+node test/tools.js     # 离线测试：终端断行修复
+node test/live.js      # 读取 accounts.local.json，用真实接口跑一次，不修改任何文件
 ```
 
-测试会在 Node 中模拟 Surge 环境，覆盖以下内容：RS256 签名与 Node crypto 结果一致、两个账号的完整流程、流量分类、部分失败时的显示、太平洋时间账单月计算。
+修改 `gcp-usage.js` 后，要重新运行 `node scripts/install-surge.js --conf <配置文件>`，Surge 里的脚本才会更新。开发约束见 `AGENTS.md`。
