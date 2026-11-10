@@ -62,7 +62,7 @@ async function queryAccount(acc, period, now) {
       .catch((e) => ({ err: e })),
     queryBilling(token, acc, period.month)
       .then((rows) => ({ ok: summarizeBilling(rows) }))
-      .catch((e) => ({ err: e })),
+      .catch((e) => ({ err: /does not match any table/.test(errMsg(e)) ? new Error("导出表尚未生成（开启账单导出后需等待数小时）") : e })),
   ]);
   return { acc, counts: mon.ok, monitorError: mon.err, billing: bill.ok, billingError: bill.err };
 }
