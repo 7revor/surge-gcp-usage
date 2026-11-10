@@ -57,8 +57,7 @@ function bqResponse(rows) {
   };
 }
 
-function run({ accounts, routes, argument }) {
-  const store = new Map();
+function run({ accounts, routes, argument, store = new Map() }) {
   const calls = [];
   let result;
   let notified;
@@ -207,18 +206,75 @@ function tokenRoute(keys) {
   assert.ok(r.notified, "notify=1 应推送通知");
   console.log("✓ 双账号流程、流量分类、部分失败显示");
 
-  // 3. token 缓存：第二次运行不再请求 token
+  // 3. token 缓存：共用同一个 store 时，第二次运行不再请求 token
   {
-    const store = r.store;
-    const r2 = await (async () => {
-      const res = await run({ accounts: accounts.slice(0, 1), routes });
-      return res;
-    })();
-    // 新的 run 有独立 store，手动验证缓存写入格式
-    const cached = JSON.parse([...store.values()][0]);
+    const one = accounts.slice(0, 1);
+    const cacheKey = "gcp_usage.token." + k1.json.client_email;
+    const r1 = await run({ accounts: one, routes });
+    assert.strictEqual(r1.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
+    const cached = JSON.parse(r1.store.get(cacheKey));
     assert.ok(cached.token && cached.exp > Date.now() / 1000);
-    assert.ok(r2.calls.some((x) => /oauth2/.test(x.url)));
-    console.log("✓ token 已写入缓存");
+    const r2 = await run({ accounts: one, routes, store: r1.store });
+    assert.strictEqual(r2.calls.filter((x) => /oauth2/.test(x.url)).length, 0, "第二次运行应使用缓存的 token");
+    assert.match(r2.result.content, /Vision 1,234 次/);
+    console.log("✓ token 缓存生效");
+
+    // 缓存的 token 已失效（401）：丢弃缓存，重新签发后重试一次
+    const store = new Map([[cacheKey, JSON.stringify({ token: "stale", exp: Math.floor(Date.now() / 1000) + 3000 })]]);
+    const reject401 = routes.map(([re, h]) => [
+      re,
+      (o) => (o.headers && o.headers.Authorization === "Bearer stale" ? [401, { error: { message: "Invalid Credentials" } }] : h(o)),
+    ]);
+    const r3 = await run({ accounts: one, routes: reject401, store });
+    assert.strictEqual(r3.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
+    assert.doesNotMatch(r3.result.content, /密钥无效|⚠/);
+    assert.match(r3.result.content, /Vision 1,234 次/);
+    assert.match(r3.result.content, /免费流量 29\.9 GiB/);
+    assert.strictEqual(JSON.parse(store.get(cacheKey)).token, "tok-" + k1.json.client_email);
+    console.log("✓ token 失效时自动重新签发");
+  }
+
+  // 3b. 标准层出站：是否收费以账单为准
+  {
+    const { ctx } = await run({ accounts: [], routes: [] });
+    const row = (region, qty, cost) => ({
+      service: "Compute Engine",
+      sku: `Network Standard Data Transfer Out to Internet from ${region}`,
+      unit: "gibibyte",
+      qty,
+      cost,
+      free_credit: 0,
+      other_credit: 0,
+      currency: "USD",
+    });
+    // 两个区域各 150：合计超过 200，但账单为 0 → 全部免费
+    let s = ctx.summarizeBilling([row("Oregon", 150, 0), row("Iowa", 150, 0)]);
+    assert.deepStrictEqual([s.stdGiB, s.freeGiB, s.paidGiB, s.paidItems.length], [300, 300, 0, 0]);
+    // 一个区域 250、另一个 50，有费用 → 只有超出的 50 收费
+    s = ctx.summarizeBilling([row("Oregon", 250, 4.25), row("Iowa", 50, 0)]);
+    assert.deepStrictEqual([s.freeGiB, s.paidGiB, s.paidCost, s.paidItems[0].name], [250, 50, 4.25, "标准出站超额"]);
+    // 每个区域都没超过 200，但账单有费用 → 按合计算超额
+    s = ctx.summarizeBilling([row("Oregon", 150, 5), row("Iowa", 150, 3.5)]);
+    assert.deepStrictEqual([s.freeGiB, s.paidGiB, s.paidCost], [200, 100, 8.5]);
+    // 没超过 200 但账单有费用 → 费用不能丢
+    s = ctx.summarizeBilling([row("Oregon", 120, 1.2)]);
+    assert.deepStrictEqual([s.freeGiB, s.paidGiB, s.paidCost, s.paidItems[0].name], [120, 0, 1.2, "标准出站"]);
+    console.log("✓ 标准层出站按账单判断是否收费");
+  }
+
+  // 3c. 时间预算用完后不再发请求，直接报超时
+  {
+    const { ctx } = await run({ accounts: [], routes: [] });
+    assert.ok(ctx.httpTimeout() <= 20 && ctx.httpTimeout() >= 1);
+    const D = vm.runInContext("Date", ctx); // 脚本运行在独立的上下文里，有自己的 Date
+    const realNow = D.now;
+    D.now = () => realNow() + 60000;
+    try {
+      assert.throws(() => ctx.httpTimeout(), /超时/);
+    } finally {
+      D.now = realNow;
+    }
+    console.log("✓ 时间预算");
   }
 
   // 4. 账单月起点 = 太平洋时间当月 1 日 0 点

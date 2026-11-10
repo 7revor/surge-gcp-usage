@@ -243,8 +243,8 @@ node scripts/install-surge.js --conf dconf/General.dconf             # 正式安
 
 - `--conf` 填步骤 1 里查到的、包含 `[Script]` 和 `[Panel]` 段的文件。
 - 修改前会把原配置文件备份到系统临时目录。
-- 已经登记过的话不会重复添加。
-- 面板自动刷新间隔默认 86400 秒，可以用 `--interval` 修改。
+- 已经登记过的话不会重复添加；被注释掉的行不算已登记。
+- 面板自动刷新间隔默认 86400 秒，可以用 `--interval` 修改。面板行已经登记过时，带上 `--interval` 会把它的 `update-interval` 改成新值。
 - 安装后会用装好的脚本做一次真实查询，并打印面板内容。
 
 告诉用户：
@@ -275,6 +275,7 @@ node scripts/install-surge.js --conf dconf/General.dconf             # 正式安
 | 关闭策略后仍然报同样的错 | 组织策略还在传播，最长 15 分钟 | 用分支 C-2 的重试循环 |
 | `Billing account for project ... is not found` | 对没有关联结算的项目启用了 API | 和本方案无关，忽略 |
 | `⚠ 账单：数据未就绪` | 还没开启账单导出，或开启不到几小时 | 确认步骤 E 已完成，等待 |
+| 面板上的错误被截短，看不出原因 | 面板一行放不下 | 完整错误在 Surge 的脚本日志里，以 `[gcp-usage]` 开头；`live.js` 也会打印 |
 | `⚠ 调用量：无权限`（`live.js` 显示 HTTP 403） | `projects` 里的某个项目没有给服务账号授予 `roles/monitoring.viewer` | 按步骤 B 补授权限 |
 | `⚠ 账单：无权限`（`bigquery.jobs.create` 被拒绝） | 账单数据项目缺少 `roles/bigquery.jobUser` | 按步骤 B 补授权限 |
 | `✗ 校验失败：Google 上找不到该 private_key_id` | 密钥已在控制台被删除 | 重新执行步骤 C 和 D（导入时加 `--force`） |

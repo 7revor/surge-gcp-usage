@@ -1,8 +1,8 @@
 /**
  * GCP 用量面板（Surge）
  *
- * - Vision / Translate 本月调用次数：Cloud Monitoring（近实时）
- * - Vision / Translate 本月计费量、Compute Engine 免费/收费流量：BigQuery 账单导出（延迟数小时）
+ * - Vision / Translate 本月调用次数与配额用量（已用/免费额度）：Cloud Monitoring（近实时）
+ * - Vision / Translate 净费用、Compute Engine 免费/收费流量：BigQuery 账单导出（延迟数小时）
  * - 多个 GCP 账号分开查询、分开显示
  *
  * 认证：服务账号 JSON 密钥，脚本内用纯 JS 实现 RS256 签 JWT 换 access token（缓存 ~1 小时）。
@@ -46,6 +46,12 @@ const FREE_QUOTA = {
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 const BILLING_TZ = "America/Los_Angeles"; // 账单月按太平洋时间划分
 
+// 总时间预算：Surge 里脚本的 timeout=60，超时会被直接终止、面板上什么都不显示。
+// 所有请求的超时都按剩余预算收紧，保证脚本能在被终止前把错误显示出来。
+const TIME_BUDGET_MS = 50000;
+const STARTED_AT = Date.now();
+const timeLeft = () => TIME_BUDGET_MS - (Date.now() - STARTED_AT);
+
 // ============================================================
 // 主流程（入口在文件末尾，确保所有常量已初始化）
 // ============================================================
@@ -54,6 +60,12 @@ async function main() {
   const now = new Date();
   const period = billingMonth(now);
   const blocks = await Promise.all(ACCOUNTS.map((acc) => queryAccount(acc, period, now).catch((e) => ({ acc, error: e }))));
+  // 面板上的错误会被截短，完整内容写进 Surge 的脚本日志
+  for (const b of blocks) {
+    if (b.error) log(`${b.acc.name} 认证: ${fullErr(b.error)}`);
+    if (b.monitorError) log(`${b.acc.name} 调用量: ${fullErr(b.monitorError)}`);
+    if (b.billingError) log(`${b.acc.name} 账单: ${fullErr(b.billingError)}`);
+  }
   return {
     title: `GCP 用量 · ${period.label}月 · ${hhmm(now)}`,
     content: render(blocks),
@@ -62,7 +74,17 @@ async function main() {
 }
 
 async function queryAccount(acc, period, now) {
-  const token = await getAccessToken(acc.key);
+  const r = await queryWithToken(acc, period, now, await getAccessToken(acc.key));
+  if (!isUnauthorized(r.monitorError) && !isUnauthorized(r.billingError)) return r;
+  // 缓存的 token 已失效（例如服务账号被停用后又恢复）：丢弃缓存，重新签发后重试一次
+  return queryWithToken(acc, period, now, await getAccessToken(acc.key, true));
+}
+
+function isUnauthorized(e) {
+  return !!e && /HTTP 401/.test(errMsg(e));
+}
+
+async function queryWithToken(acc, period, now, token) {
   const projects = acc.projects && acc.projects.length ? acc.projects : [acc.key.project_id];
   const [mon, bill] = await Promise.all([
     Promise.all(
@@ -167,15 +189,14 @@ GROUP BY service, sku`;
   let res = await request("POST", `https://bigquery.googleapis.com/bigquery/v2/projects/${project}/queries`, token, {
     query: sql,
     useLegacySql: false,
-    timeoutMs: 20000,
+    timeoutMs: 10000,
   });
-  for (let i = 0; !res.jobComplete && i < 5; i++) {
+  // 每轮最多等 10 秒；剩余时间不够再等一轮时就放弃
+  while (!res.jobComplete && timeLeft() > 15000) {
     const ref = res.jobReference;
-    res = await request(
-      "GET",
-      `https://bigquery.googleapis.com/bigquery/v2/projects/${ref.projectId}/queries/${ref.jobId}?${qs({ location: ref.location, timeoutMs: 10000 })}`,
-      token
-    );
+    const q = { timeoutMs: 10000 };
+    if (ref.location) q.location = ref.location;
+    res = await request("GET", `https://bigquery.googleapis.com/bigquery/v2/projects/${ref.projectId}/queries/${ref.jobId}?${qs(q)}`, token);
   }
   if (!res.jobComplete) throw new Error("BigQuery 查询超时");
   const names = res.schema.fields.map((f) => f.name);
@@ -189,7 +210,8 @@ GROUP BY service, sku`;
 /**
  * 流量分类规则：
  * - Carrier/Direct Peering、CDN Interconnect 出站 → 收费（不享受标准层 200 GiB 免费额度）
- * - 标准层互联网出站 → 免费（200 GiB 内）；超出部分 → 收费
+ * - 标准层互联网出站 → 免费；账单上产生了费用时，超出 200 GiB 的部分 → 收费
+ *   （超额量先按区域各 200 GiB 算，算不出超额再按全部区域合计算）
  * - 入站 → 免费
  * - 其他（如发往 Google 服务）→ 扣除免费层抵扣后仍有费用则收费，否则免费
  */
@@ -206,6 +228,7 @@ function summarizeBilling(rows) {
     paidItems: [],
   };
   let stdCost = 0;
+  let stdOverByRegion = 0; // 每个 SKU 对应一个区域
   for (const r of rows) {
     const qty = Number(r.qty) || 0;
     const cost = Number(r.cost) || 0;
@@ -230,6 +253,7 @@ function summarizeBilling(rows) {
     } else if (/standard/i.test(sku) && /internet/i.test(sku) && isOut) {
       s.stdGiB += qty;
       stdCost += cost + freeCredit;
+      stdOverByRegion += Math.max(0, qty - STANDARD_FREE_GIB);
     } else if (/\bin\b|ingress/i.test(sku) && !isOut) {
       s.freeGiB += qty;
     } else if (cost + freeCredit > 1e-9) {
@@ -238,9 +262,12 @@ function summarizeBilling(rows) {
       s.freeGiB += qty;
     }
   }
-  const stdOver = Math.max(0, s.stdGiB - STANDARD_FREE_GIB);
+  // 是否收费以账单为准：只有实际产生了费用，才把超出免费额度的部分算作收费。
+  // 这样多个区域合计超过 200 GiB 但账单为 0 时不会误报，有费用时也不会漏掉。
+  const stdPaid = stdCost > 1e-9;
+  const stdOver = stdPaid ? stdOverByRegion || Math.max(0, s.stdGiB - STANDARD_FREE_GIB) : 0;
   s.freeGiB += s.stdGiB - stdOver;
-  if (stdOver > 0) addPaid(s, "标准出站超额", stdOver, stdCost);
+  if (stdPaid) addPaid(s, stdOver > 0 ? "标准出站超额" : "标准出站", stdOver, stdCost);
   s.paidItems.sort((a, b) => b.gib - a.gib);
   return s;
 }
@@ -417,7 +444,7 @@ const mmddhhmm = (d) => `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${hhmm(d
 
 function request(method, url, token, body) {
   return new Promise((resolve, reject) => {
-    const opts = { url, timeout: 30, headers: { Authorization: "Bearer " + token } };
+    const opts = { url, timeout: httpTimeout(), headers: { Authorization: "Bearer " + token } };
     if (body !== undefined) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
@@ -427,8 +454,15 @@ function request(method, url, token, body) {
   });
 }
 
+/** 单次请求的超时（秒）：最多 20 秒，且不超过剩余的总时间预算 */
+function httpTimeout() {
+  const left = Math.floor(timeLeft() / 1000);
+  if (left < 1) throw new Error("请求超时");
+  return Math.min(20, left);
+}
+
 function handleResp(err, resp, data, resolve, reject) {
-  if (err) return reject(new Error(String(err)));
+  if (err || !resp) return reject(new Error(String(err || "无响应")));
   let json = null;
   try {
     json = JSON.parse(data);
@@ -458,22 +492,33 @@ function parseArgs(s) {
   return o;
 }
 
+function fullErr(e) {
+  return String((e && e.message) || e);
+}
+
 function errMsg(e) {
-  return String((e && e.message) || e).slice(0, 160);
+  return fullErr(e).slice(0, 160);
+}
+
+function log(msg) {
+  if (typeof console !== "undefined") console.log("[gcp-usage] " + msg);
 }
 
 // ============================================================
 // 服务账号认证（JWT RS256）
 // ============================================================
 
-async function getAccessToken(key) {
+/** fresh=true 时跳过缓存，重新签发并覆盖缓存 */
+async function getAccessToken(key, fresh) {
   if (!key || !key.client_email || !/BEGIN/.test(key.private_key || "")) throw new Error("服务账号密钥未配置");
   const cacheKey = "gcp_usage.token." + key.client_email;
   const nowSec = Math.floor(Date.now() / 1000);
-  try {
-    const c = JSON.parse($persistentStore.read(cacheKey) || "null");
-    if (c && c.exp - 300 > nowSec) return c.token;
-  } catch (e) {}
+  if (!fresh) {
+    try {
+      const c = JSON.parse($persistentStore.read(cacheKey) || "null");
+      if (c && c.exp - 300 > nowSec) return c.token;
+    } catch (e) {}
+  }
 
   const tokenUri = key.token_uri || "https://oauth2.googleapis.com/token";
   const header = b64url(utf8(JSON.stringify({ alg: "RS256", typ: "JWT", kid: key.private_key_id })));
@@ -495,7 +540,7 @@ async function getAccessToken(key) {
     $httpClient.post(
       {
         url: tokenUri,
-        timeout: 30,
+        timeout: httpTimeout(),
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: "grant_type=" + encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer") + "&assertion=" + jwt,
       },

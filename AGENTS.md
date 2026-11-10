@@ -14,10 +14,11 @@
    - 需要读取字段时，用脚本只输出 `client_email` 这类非敏感字段。
    - 导入密钥只能用 `scripts/import-key.js`。
 2. **不提交密钥**：`.gitignore` 已经忽略 `keys/`、`*.local.json` 和 `gcp-key-*.json`。提交前要用 `git status --short` 确认。
-3. **`keys/` 和 `accounts.local.json` 只放在主检出目录**：在 worktree 里运行本地脚本时，要用 `--accounts <主目录>/accounts.local.json` 指过去，`keyFile` 会按这个文件所在的目录解析。
+3. **`keys/` 和 `accounts.local.json` 只放在主检出目录**：在 worktree 里运行本地脚本时，要用 `--accounts <主目录>/accounts.local.json` 指过去，`keyFile` 会按这个文件所在的目录解析。`import-key.js` 在 worktree 里不带这个参数会直接报错；带上时，密钥写到这个文件旁边的 `keys/`。
 4. **修改 `gcp-usage.js` 时要保持与 JavaScriptCore（Surge 运行时）兼容**：
    - 不能用 Node API、`require`、顶层 `await`、`fetch`、`atob` 或 `TextEncoder`。
-   - 只能用 Surge 提供的 `$httpClient`、`$persistentStore`、`$notification`、`$done`、`$argument`、`$trigger`。
+   - 只能用 Surge 提供的 `$httpClient`、`$persistentStore`、`$notification`、`$done`、`$argument`、`$trigger`，以及写日志用的 `console.log`（通过 `log()` 调用，它会先判断 `console` 是否存在）。
+   - 发请求时超时一律用 `httpTimeout()`，不要写死秒数：脚本总共只有 50 秒的时间预算。
    - 入口调用必须放在文件末尾。`main()` 会同步执行到第一个 `await`，如果入口放在前面，后面的 `const` 还处在暂时性死区（TDZ），会报错。
    - 可以用 BigInt，RS256 签名依赖它。
    - 可以用 macOS 的 JXA 验证：`osascript -l JavaScript`，它同样运行在 JSC 上。

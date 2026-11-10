@@ -54,6 +54,7 @@ function runInSurgeShim(src, { trigger = "button", argument = "" } = {}) {
       $trigger: trigger,
       $argument: argument,
       $done: resolve,
+      console, // 脚本把完整的错误信息写到日志里
     });
     vm.runInContext(src, ctx);
   });
@@ -102,18 +103,57 @@ function pick(o, keys) {
   return r;
 }
 
+// 不带值的开关：后面跟着的参数不属于它（例如 `--clipboard main` 里的 main 是账号名）
+const BOOL_FLAGS = new Set(["clipboard", "move", "force", "dry-run", "no-check"]);
+
 function parseFlags(argv) {
   const flags = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
-      const [k, v] = a.slice(2).split("=");
-      if (v !== undefined) flags[k] = v;
-      else if (argv[i + 1] && !argv[i + 1].startsWith("--")) flags[k] = argv[++i];
+      const eq = a.indexOf("=");
+      const k = eq < 0 ? a.slice(2) : a.slice(2, eq);
+      if (eq >= 0) flags[k] = a.slice(eq + 1);
+      else if (!BOOL_FLAGS.has(k) && argv[i + 1] && !argv[i + 1].startsWith("--")) flags[k] = argv[++i];
       else flags[k] = true;
     } else flags._.push(a);
   }
   return flags;
+}
+
+// ---------- Surge 配置文件 ----------
+
+const isComment = (l) => /^\s*(#|;|\/\/)/.test(l);
+
+/** 第一条未被注释、且匹配 matcher 的行的下标；没有则返回 -1 */
+function findActiveLine(lines, matcher) {
+  return lines.findIndex((l) => !isComment(l) && matcher.test(l));
+}
+
+/** 若没有生效的匹配行，则把 line 追加到 [section] 段末尾（段不存在时在文件末尾新建） */
+function ensureLine(text, section, line, matcher) {
+  const lines = text.split("\n");
+  if (findActiveLine(lines, matcher) >= 0) return text;
+  const head = lines.findIndex((l) => l.trim() === `[${section}]`);
+  if (head < 0) return text.replace(/\n*$/, "") + `\n\n[${section}]\n${line}\n`;
+  let end = head + 1;
+  while (end < lines.length && !/^\s*\[.+\]\s*$/.test(lines[end])) end++;
+  let insertAt = end;
+  while (insertAt > head + 1 && lines[insertAt - 1].trim() === "") insertAt--;
+  lines.splice(insertAt, 0, line);
+  return lines.join("\n");
+}
+
+/** 把匹配行里的 update-interval 改成 interval（没有这个参数时补上） */
+function setPanelInterval(text, matcher, interval) {
+  const lines = text.split("\n");
+  const i = findActiveLine(lines, matcher);
+  if (i < 0) return text;
+  const re = /update-interval\s*=\s*[^,\r]*/;
+  lines[i] = re.test(lines[i])
+    ? lines[i].replace(re, "update-interval=" + interval)
+    : lines[i].replace(/\r?$/, (cr) => `,update-interval=${interval}${cr}`);
+  return lines.join("\n");
 }
 
 module.exports = {
@@ -127,4 +167,6 @@ module.exports = {
   repairJson,
   verifyKey,
   parseFlags,
+  ensureLine,
+  setPanelInterval,
 };

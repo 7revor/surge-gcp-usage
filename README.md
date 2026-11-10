@@ -79,13 +79,19 @@ const FREE_QUOTA = {
 
 | SKU（示例） | 归类 |
 |---|---|
-| `Network Standard Data Transfer Out to Internet from Oregon` | 免费。标准层每月 200 GiB 免费，超出部分计入收费 |
+| `Network Standard Data Transfer Out to Internet from Oregon` | 免费。标准层每月 200 GiB 免费；账单上产生了费用时，超出部分计入收费（见下方说明） |
 | `Network Standard Internet Data Transfer In to Oregon` | 免费（入站） |
 | `Network Data Transfer In via Carrier Peering Network - Americas Based` | 免费（入站） |
 | `Network Data Transfer In from Google Services from Americas to Americas` | 免费（入站） |
 | `Network Data Transfer to Google Services from Americas to Americas` | 按账单判断：扣除免费层抵扣后费用为 0 就算免费 |
 | `Network Data Transfer Out via Carrier Peering Network - Americas Based` | **收费**。这是发往 CDN Interconnect 合作伙伴的出站流量（例如 Cloudflare），不享受标准层的 200 GiB 免费额度 |
 | 其他出站 SKU | 扣除免费层抵扣后仍有费用的算收费，否则算免费 |
+
+标准层出站是否收费以账单为准：
+- 账单上这类 SKU 的费用为 0 时，全部算免费，即使几个区域合计超过了 200 GiB。
+- 账单上有费用时，超额量先按每个区域（每个 SKU 对应一个区域）各 200 GiB 计算；每个区域都没超过时，再按全部区域合计计算。
+- 「出站 x/200」里的 x 是所有区域的合计。
+- 200 GiB 是按区域算还是按结算账号合计，我没能在官方定价页上确认，所以没有把其中一种写死。
 
 金额的含义：
 - 「收费流量」后面的金额：原价减去免费层抵扣（`FREE_TIER`），不扣赠金和促销抵扣，表示这部分流量本身的价格。
@@ -97,11 +103,15 @@ const FREE_QUOTA = {
 
 | 请求 | 频率 | 计费 |
 |---|---|---|
-| `oauth2.googleapis.com/token` | 约 55 分钟一次，其余时间用缓存 | 免费 |
-| Monitoring `timeSeries.list` | 每个项目 1 次，每次返回 2 条时间序列 | 每个结算账号每月前 100 万条免费，超出部分 $0.50/百万条 |
+| `oauth2.googleapis.com/token` | 约 55 分钟一次，其余时间用缓存；缓存的 token 被拒绝（HTTP 401）时会重新签发并重试一次 | 免费 |
+| Monitoring `timeSeries.list` | 每个项目 2 次：调用次数返回 2 条时间序列，配额用量每个配额指标返回 1 条（实测约 5 条） | 每个结算账号每月前 100 万条免费，超出部分 $0.50/百万条 |
 | BigQuery `jobs.query` | 1 次 | 每月前 1 TiB 免费。每次查询最少按 10 MB 计，而且通配查询不会命中结果缓存 |
 
-账单导出本身免费，导出表的存储也在 BigQuery 每月 10 GiB 的免费额度内。每天刷新一次的话，一个月约 300 MB 查询量、60 条时间序列，都远低于免费额度。
+账单导出本身免费，导出表的存储也在 BigQuery 每月 10 GiB 的免费额度内。每天刷新一次的话，一个月约 300 MB 查询量、200 多条时间序列，都远低于免费额度。
+
+脚本给自己留了 50 秒的总时间预算（Surge 里脚本的 `timeout=60`）：单次请求最多等 20 秒，BigQuery 查询没跑完时每轮再等 10 秒，剩余时间不够就放弃并显示「请求超时」。
+
+面板上的错误会被截短。完整的错误信息写在 Surge 的脚本日志里，以 `[gcp-usage]` 开头；`node test/live.js` 也会打印出来。
 
 ## 面板刷新机制
 
@@ -130,8 +140,8 @@ gcp-usage-notify = type=cron,cronexp="0 9 * * *",script-path=js/gcp-usage.js,tim
 ## 开发与测试
 
 ```bash
-node test/harness.js   # 离线测试：RS256 签名与 Node crypto 一致、多账号流程、流量分类、部分失败显示、太平洋时间账单月
-node test/tools.js     # 离线测试：终端断行修复
+node test/harness.js   # 离线测试：RS256 签名与 Node crypto 一致、多账号流程、流量分类、部分失败显示、token 缓存与失效重试、太平洋时间账单月
+node test/tools.js     # 离线测试：终端断行修复、命令行参数解析、Surge 配置行登记
 node test/live.js      # 读取 accounts.local.json，用真实接口跑一次，不修改任何文件
 ```
 
