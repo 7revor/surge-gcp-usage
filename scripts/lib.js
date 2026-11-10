@@ -97,6 +97,26 @@ async function verifyKey(key) {
   return gpub === pub ? { ok: true } : { ok: false, reason: "私钥与 Google 登记的公钥不匹配" };
 }
 
+/** 用服务账号密钥换 access token（Node crypto 签名，仅本地脚本使用） */
+async function getAccessToken(key) {
+  const now = Math.floor(Date.now() / 1000);
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const aud = key.token_uri || "https://oauth2.googleapis.com/token";
+  const unsigned =
+    b64({ alg: "RS256", typ: "JWT", kid: key.private_key_id }) +
+    "." +
+    b64({ iss: key.client_email, scope: "https://www.googleapis.com/auth/cloud-platform", aud, iat: now, exp: now + 3600 });
+  const sig = crypto.sign("RSA-SHA256", Buffer.from(unsigned), key.private_key).toString("base64url");
+  const res = await fetch(aud, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=" + encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer") + "&assertion=" + unsigned + "." + sig,
+  });
+  const j = await res.json();
+  if (!res.ok || !j.access_token) throw new Error(`获取 token 失败：HTTP ${res.status} ${j.error_description || j.error || ""}`);
+  return j.access_token;
+}
+
 function pick(o, keys) {
   const r = {};
   for (const k of keys) if (o[k] !== undefined) r[k] = o[k];
@@ -166,6 +186,7 @@ module.exports = {
   runInSurgeShim,
   repairJson,
   verifyKey,
+  getAccessToken,
   parseFlags,
   ensureLine,
   setPanelInterval,
