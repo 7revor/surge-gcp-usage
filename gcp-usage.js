@@ -331,9 +331,9 @@ function renderAccount(b, issues) {
     if (costs.length) lines.push(`Cost: ${costs.join(" · ")}`);
 
     // Free：标准层出站 / 免费额度，账单确认有超额收费时行首加 ‼；Paid：收费流量 / 流量费用
-    const free = `Traffic Free: ${gib(bill.stdGiB)}/${gib(STANDARD_FREE_GIB)}`;
+    const free = `Traffic Free: ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`;
     lines.push(bill.stdOverGiB > 0 ? "‼ " + free : free);
-    lines.push(`Traffic Paid: ${gib(bill.paidGiB)}/${money(bill.paidCost, bill.currency)}`);
+    lines.push(`Traffic Paid: ${gib(bill.paidGiB)} / ${money(bill.paidCost, bill.currency)}`);
   }
   return lines.join("\n");
 }
@@ -353,7 +353,7 @@ function apiLine(b, key, label) {
     used = callsN;
   }
   const fmt = q.compact ? fmtBig : fmtNum;
-  const line = `${label}: ${used === null ? "?" : fmt(used)}/${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
+  const line = `${label}: ${used === null ? "?" : fmt(used)} / ${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
   return used !== null && used > q.limit ? "‼ " + line : line;
 }
 
