@@ -44,6 +44,14 @@ const FREE_QUOTA = {
   translate: { limit: 500000, unit: "", compact: true, basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
+
+// 面板外观：
+//   每项用量前画一条进度条（▰ 已用 / ▱ 剩余），超额时最后一格换成 ‼
+//   图标用 SF Symbol，颜色表示整体状态：正常绿；用量达到 WARN_RATIO、有费用或数据未就绪橙；超额或认证失败红
+const BAR_CELLS = 6; // 进度条格数；面板一行约 18.5 个汉字宽，6 格时最长的 Translate 行刚好放得下
+const WARN_RATIO = 0.8;
+const ICON = "cloud.fill";
+const ICON_COLOR = ["#34C759", "#FF9500", "#FF3B30"]; // 正常 / 注意 / 超额
 const BILLING_TZ = "America/Los_Angeles"; // 账单月按太平洋时间划分
 
 // 总时间预算：Surge 里脚本的 timeout=60，超时会被直接终止、面板上什么都不显示。
@@ -66,11 +74,53 @@ async function main() {
     if (b.monitorError) log(`${b.acc.name} 用量: ${fullErr(b.monitorError)}`);
     if (b.billingError) log(`${b.acc.name} 账单: ${fullErr(b.billingError)}`);
   }
+  const cost = totalCost(blocks);
   return {
-    title: `GCP Usage · ${hhmm(now)}`,
+    title: cost.amount >= 0.01 ? `GCP · ${money(cost.amount, cost.currency)} · ${hhmm(now)}` : `GCP · ${hhmm(now)}`,
     content: render(blocks),
-    style: "info",
+    icon: ICON,
+    "icon-color": ICON_COLOR[panelLevel(blocks)],
   };
+}
+
+/** 所有账号本月费用合计：收费流量 + Vision/Translate 净费用 */
+function totalCost(blocks) {
+  let amount = 0;
+  let currency = "";
+  for (const b of blocks) {
+    const bill = b.billing;
+    if (!bill) continue;
+    amount += Math.max(0, bill.paidCost) + Math.max(0, bill.vision.net) + Math.max(0, bill.translate.net);
+    currency = currency || bill.currency;
+  }
+  return { amount, currency };
+}
+
+/** 整体状态：0 正常，1 注意（用量 ≥ WARN_RATIO、有费用、部分数据缺失），2 超额或认证失败 */
+function panelLevel(blocks) {
+  let level = 0;
+  const raise = (n) => (level = Math.max(level, n));
+  for (const b of blocks) {
+    if (b.error) {
+      raise(2);
+      continue;
+    }
+    if (b.monitorError || b.billingError) raise(1);
+    for (const key of Object.keys(FREE_QUOTA)) {
+      const q = FREE_QUOTA[key];
+      const used = apiUsed(b, key);
+      if (!q.limit || used === null) continue;
+      if (used > q.limit) raise(2);
+      else if (used >= q.limit * WARN_RATIO) raise(1);
+    }
+    const bill = b.billing;
+    if (bill) {
+      if (bill.stdOverGiB > 0) raise(2);
+      else if (bill.stdGiB >= STANDARD_FREE_GIB * WARN_RATIO) raise(1);
+    }
+  }
+  if (totalCost(blocks).amount >= 0.01) raise(1);
+  return level;
 }
 
 async function queryAccount(acc, period, now) {
@@ -321,15 +371,17 @@ function render(blocks) {
 
 function renderAccount(b, issues) {
   const name = b.acc.name;
-  const lines = [`▸ ${name}`];
-  if (b.error) return lines.concat(`✗ ${shortErr(b.error)}`).join("\n");
+  if (b.error) return [`▸ ${name}`, `✗ ${shortErr(b.error)}`].join("\n");
   if (b.monitorError) issues.push({ scope: "用量", msg: shortErr(b.monitorError), name });
   if (b.billingError) issues.push({ scope: "账单", msg: shortErr(b.billingError), name });
+
+  // 账号标题带账单统计截止时间（手机本地时间，表示此前的用量已计入）
+  const bill = b.billing;
+  const lines = [bill && bill.usageEnd ? `▸ ${name} · thru ${mmddhhmm(new Date(bill.usageEnd * 1000))}` : `▸ ${name}`];
 
   lines.push(apiLine(b, "vision", "Vision"));
   lines.push(apiLine(b, "translate", "Translate"));
 
-  const bill = b.billing;
   if (bill) {
     // Vision / Translate 净费用：只在 ≥ $0.01 时显示
     const costs = [];
@@ -337,37 +389,46 @@ function renderAccount(b, issues) {
     if (bill.translate.net >= 0.01) costs.push(`Translate ${money(bill.translate.net, bill.currency)}`);
     if (costs.length) lines.push(`Cost: ${costs.join(" · ")}`);
 
-    // 流量分组：标题带账单统计截止时间（手机本地时间，表示此前的用量已计入）
-    // Free：标准层出站 / 免费额度，账单确认有超额收费时加 ‼；Paid：收费流量 / 流量费用
+    // Free：标准层出站 / 免费额度，账单确认有超额收费时进度条末格为 ‼；Paid：收费流量 · 流量费用
     if (!bill.usageEnd) {
       lines.push("Traffic: 本月暂无账单");
     } else {
-      lines.push(`Traffic (thru ${mmddhhmm(new Date(bill.usageEnd * 1000))}):`);
-      const free = `Free: ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`;
-      lines.push("  " + (bill.stdOverGiB > 0 ? "‼ " + free : free));
-      lines.push(`  Paid: ${gib(bill.paidGiB)} / ${money(bill.paidCost, bill.currency)}`);
+      lines.push(`${bar(bill.stdGiB, STANDARD_FREE_GIB, bill.stdOverGiB > 0)} Free ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`);
+      lines.push(`Paid ${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
     }
   }
   return lines.join("\n");
 }
 
-/** 例：「Vision: 19/1,000」「Translate: 5.6K/500K」（compact 时用 K/M 缩写），超额时行首加 ‼；没设额度时显示「Vision: 20 次」 */
+/** 例：「▰▰▰▰▱▱ Vision 640 / 1,000」「▱▱▱▱▱▱ Translate 0 / 500K」（compact 时用 K/M 缩写）；没设额度时显示「Vision 20 次」 */
 function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
-  const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
-  if (!q.limit) return `${label}: ${callsN === null ? "?" : fmtInt(callsN)} 次`;
-
-  let used = null;
-  if (q.basis === "quota") {
-    if (b.quota) used = b.quota[q.quotaMetric] || 0;
-  } else if (q.basis === "billing") {
-    if (b.billing) used = b.billing[key].qty;
-  } else {
-    used = callsN;
+  if (!q.limit) {
+    const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
+    return `${label} ${callsN === null ? "?" : fmtInt(callsN)} 次`;
   }
-  const fmt = q.compact ? fmtBig : fmtNum;
-  const line = `${label}: ${used === null ? "?" : fmt(used)} / ${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
-  return used !== null && used > q.limit ? "‼ " + line : line;
+  const used = apiUsed(b, key);
+  // 完整数字到 6 位时行会超宽，改用 K/M 缩写
+  const fmt = q.compact || (used || 0) >= 100000 ? fmtBig : fmtNum;
+  const value = `${used === null ? "?" : fmt(used)} / ${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
+  return `${bar(used, q.limit, used !== null && used > q.limit)} ${label} ${value}`;
+}
+
+/** 按 FREE_QUOTA[key].basis 取本月已用量；数据缺失时返回 null */
+function apiUsed(b, key) {
+  const q = FREE_QUOTA[key] || {};
+  if (q.basis === "quota") return b.quota ? b.quota[q.quotaMetric] || 0 : null;
+  if (q.basis === "billing") return b.billing ? b.billing[key].qty : null;
+  return b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
+}
+
+/** 进度条：BAR_CELLS 格，有用量时至少 1 格；超额时前面填满、最后一格为 ‼；数据缺失时全空 */
+function bar(used, limit, over) {
+  if (over) return "▰".repeat(BAR_CELLS - 1) + "‼";
+  let n = used ? Math.round((used / limit) * BAR_CELLS) : 0;
+  if (used > 0 && n === 0) n = 1;
+  n = Math.min(n, BAR_CELLS);
+  return "▰".repeat(n) + "▱".repeat(BAR_CELLS - n);
 }
 
 function shortErr(e) {
@@ -391,12 +452,12 @@ function money(v, cur) {
 const fmtG = (v) => (v === 0 ? "0" : v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : v.toFixed(0));
 /** 流量，单位 GiB，写作 G，与 API 行的 K/M 风格一致，例：0G / 14.6G / 200G */
 const gib = (v) => `${fmtG(v)}G`;
-/** 英文缩写，保留一位小数，例：19 / 4.3K / 500K / 1.2M */
+/** 英文缩写，不足 10 时保留一位小数，否则取整（保证进度条行不超宽），例：19 / 4.3K / 312K / 500K / 1.2M / 12M */
 function fmtBig(v) {
   if (v < 1000) return Number.isInteger(v) ? String(v) : v.toFixed(2);
-  const k = (v / 1e3).toFixed(1);
-  if (Number(k) < 1000) return k.replace(/\.0$/, "") + "K";
-  return (v / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  const short = (x) => (x < 9.95 ? x.toFixed(1).replace(/\.0$/, "") : String(Math.round(x)));
+  if (Math.round(v / 1e3) < 1000) return short(v / 1e3) + "K";
+  return short(v / 1e6) + "M";
 }
 /** 完整数字，千分位，例：19 / 1,000 / 12.50 */
 function fmtNum(v) {
@@ -760,5 +821,5 @@ main()
     $done(panel);
   })
   .catch((e) => {
-    $done({ title: "GCP Usage", content: "✗ " + errMsg(e), style: "info" });
+    $done({ title: "GCP", content: "✗ " + errMsg(e), icon: ICON, "icon-color": ICON_COLOR[2] });
   });
