@@ -2,6 +2,7 @@
  * GCP 用量面板（Surge）
  *
  * - Vision / Translate 本月调用次数与配额用量（已用/免费额度）：Cloud Monitoring（近实时）
+ * - 本月外部出站流量（Traffic）：Cloud Monitoring vm_flow 指标（近实时，采样估算）
  * - Vision / Translate 净费用、Compute Engine 免费/收费流量：BigQuery 账单导出（延迟数小时）
  * - 多个 GCP 账号分开查询、分开显示
  *
@@ -46,9 +47,9 @@ const FREE_QUOTA = {
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 
 // 面板外观：
-//   每项用量前画一条进度条（▰ 已用 / ▱ 剩余），超额时最后一格换成 ‼
+//   有额度的行在末尾画进度条（▰ 已用 / ▱ 剩余）和百分比；用量达到额度时进度条填满，百分比换成 ‼
 //   图标用 SF Symbol，颜色表示整体状态：正常绿；用量达到 WARN_RATIO、有费用或数据未就绪橙；超额或认证失败红
-const BAR_CELLS = 6; // 进度条格数；面板一行约 18.5 个汉字宽，6 格时最长的 Translate 行刚好放得下
+const BAR_CELLS = 4; // 进度条格数；面板一行约 18.5 个汉字宽，4 格加百分比时最长的 Translate 行刚好放得下
 const WARN_RATIO = 0.8;
 const ICON = "cloud.fill";
 const ICON_COLOR = ["#34C759", "#FF9500", "#FF3B30"]; // 正常 / 注意 / 超额
@@ -142,10 +143,17 @@ async function queryWithToken(acc, period, now, token) {
         Promise.all([
           needCallCounts() ? apiRequestCounts(token, p, period.start, now) : {},
           quotaUsage(token, p, period.start, now),
+          externalEgress(token, p, period.start, now),
         ])
       )
     )
-      .then((list) => ({ ok: { counts: mergeCounts(list.map((x) => x[0])), quota: mergeCounts(list.map((x) => x[1])) } }))
+      .then((list) => ({
+        ok: {
+          counts: mergeCounts(list.map((x) => x[0])),
+          quota: mergeCounts(list.map((x) => x[1])),
+          trafficGiB: list.reduce((n, x) => n + (x[2].EXTERNAL || 0), 0) / GIB,
+        },
+      }))
       .catch((e) => ({ err: e })),
     queryBilling(token, acc, period.month)
       .then((rows) => ({ ok: summarizeBilling(rows) }))
@@ -155,6 +163,7 @@ async function queryWithToken(acc, period, now, token) {
     acc,
     counts: mon.ok && mon.ok.counts,
     quota: mon.ok && mon.ok.quota,
+    trafficGiB: mon.ok ? mon.ok.trafficGiB : null,
     monitorError: mon.err,
     billing: bill.ok,
     billingError: bill.err,
@@ -186,6 +195,19 @@ function quotaUsage(token, project, start, end) {
     `resource.labels.service=one_of("${SERVICES.vision}","${SERVICES.translate}")`;
   return sumSeries(token, project, filter, "metric.labels.quota_metric", start, end);
 }
+
+/**
+ * 外部出站字节数：vm_flow 指标里 remote_location_type = EXTERNAL 的部分，即发往互联网的流量。
+ * 包括对等互连（如 Cloudflare）等收费出站，不分网络层级；按采样估算，和账单会有几个百分点的误差。
+ */
+function externalEgress(token, project, start, end) {
+  const filter =
+    'metric.type="networking.googleapis.com/vm_flow/egress_bytes_count" AND resource.type="gce_instance" AND ' +
+    'metric.labels.remote_location_type="EXTERNAL"';
+  return sumSeries(token, project, filter, "metric.labels.remote_location_type", start, end);
+}
+
+const GIB = 1024 * 1024 * 1024;
 
 /** 对 [start, end] 区间求和，按 groupBy（如 resource.labels.service）分组 */
 async function sumSeries(token, project, filter, groupBy, start, end) {
@@ -375,32 +397,36 @@ function renderAccount(b, issues) {
   if (b.monitorError) issues.push({ scope: "用量", msg: shortErr(b.monitorError), name });
   if (b.billingError) issues.push({ scope: "账单", msg: shortErr(b.billingError), name });
 
-  // 账号标题带账单统计截止时间（手机本地时间，表示此前的用量已计入）
-  const bill = b.billing;
-  const lines = [bill && bill.usageEnd ? `▸ ${name} · thru ${mmddhhmm(new Date(bill.usageEnd * 1000))}` : `▸ ${name}`];
-
+  const lines = [`▸ ${name}`];
   lines.push(apiLine(b, "vision", "Vision"));
   lines.push(apiLine(b, "translate", "Translate"));
 
+  // Vision / Translate 净费用：只在 ≥ $0.01 时显示
+  const bill = b.billing;
   if (bill) {
-    // Vision / Translate 净费用：只在 ≥ $0.01 时显示
     const costs = [];
     if (bill.vision.net >= 0.01) costs.push(`Vision ${money(bill.vision.net, bill.currency)}`);
     if (bill.translate.net >= 0.01) costs.push(`Translate ${money(bill.translate.net, bill.currency)}`);
     if (costs.length) lines.push(`Cost: ${costs.join(" · ")}`);
+  }
 
-    // Free：标准层出站 / 免费额度，账单确认有超额收费时进度条末格为 ‼；Paid：收费流量 · 流量费用
+  // Traffic：本月外部出站总量（Monitoring，实时）。下面缩进的 Free / Paid 来自账单，最后一行是账单统计截止时间
+  // （手机本地时间，表示此前的用量已计入），只对 Free / Paid 有效
+  lines.push(`Traffic ${b.trafficGiB == null ? "?" : gib(b.trafficGiB)}`);
+  if (bill) {
     if (!bill.usageEnd) {
-      lines.push("Traffic: 本月暂无账单");
+      lines.push("  Free / Paid: 本月暂无账单");
     } else {
-      lines.push(`${bar(bill.stdGiB, STANDARD_FREE_GIB, bill.stdOverGiB > 0)} Free ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`);
-      lines.push(`Paid ${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
+      // Free：标准层出站 / 免费额度，账单确认有超额收费时进度条填满、百分比换成 ‼；Paid：收费流量 · 流量费用
+      lines.push(`  Free ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)} ${meter(bill.stdGiB, STANDARD_FREE_GIB, bill.stdOverGiB > 0)}`);
+      lines.push(`  Paid ${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
+      lines.push(`  账单截至 ${mmddhhmm(new Date(bill.usageEnd * 1000))}`);
     }
   }
   return lines.join("\n");
 }
 
-/** 例：「▰▰▰▰▱▱ Vision 640 / 1,000」「▱▱▱▱▱▱ Translate 0 / 500K」（compact 时用 K/M 缩写）；没设额度时显示「Vision 20 次」 */
+/** 例：「Vision 640 / 1,000 ▰▰▰▱ 64%」「Translate 0 / 500K ▱▱▱▱ 0%」（compact 时用 K/M 缩写）；没设额度时显示「Vision 20 次」 */
 function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
   if (!q.limit) {
@@ -411,7 +437,7 @@ function apiLine(b, key, label) {
   // 完整数字到 6 位时行会超宽，改用 K/M 缩写
   const fmt = q.compact || (used || 0) >= 100000 ? fmtBig : fmtNum;
   const value = `${used === null ? "?" : fmt(used)} / ${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
-  return `${bar(used, q.limit, used !== null && used > q.limit)} ${label} ${value}`;
+  return `${label} ${value} ${meter(used, q.limit, used !== null && used >= q.limit)}`;
 }
 
 /** 按 FREE_QUOTA[key].basis 取本月已用量；数据缺失时返回 null */
@@ -422,13 +448,28 @@ function apiUsed(b, key) {
   return b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
 }
 
-/** 进度条：BAR_CELLS 格，有用量时至少 1 格；超额时前面填满、最后一格为 ‼；数据缺失时全空 */
-function bar(used, limit, over) {
-  if (over) return "▰".repeat(BAR_CELLS - 1) + "‼";
-  let n = used ? Math.round((used / limit) * BAR_CELLS) : 0;
+/**
+ * 行尾的进度条和百分比，例：「▰▰▰▱ 64%」。
+ * full（额度已用完或超额）时进度条填满、百分比换成 ‼；数据缺失时进度条全空、不显示百分比。
+ */
+function meter(used, limit, full) {
+  if (full) return "▰".repeat(BAR_CELLS) + " ‼";
+  if (used === null || used === undefined) return "▱".repeat(BAR_CELLS);
+  return `${bar(used, limit)} ${percent(used, limit)}%`;
+}
+
+/** 进度条：BAR_CELLS 格，和百分比一样向下取整（只有用完才填满），有用量时至少 1 格 */
+function bar(used, limit) {
+  let n = used ? Math.floor((used / limit) * BAR_CELLS) : 0;
   if (used > 0 && n === 0) n = 1;
   n = Math.min(n, BAR_CELLS);
   return "▰".repeat(n) + "▱".repeat(BAR_CELLS - n);
+}
+
+/** 百分比向下取整（避免没用完就显示 100%），有用量时至少 1 */
+function percent(used, limit) {
+  const p = Math.floor((used / limit) * 100);
+  return used > 0 && p === 0 ? 1 : p;
 }
 
 function shortErr(e) {

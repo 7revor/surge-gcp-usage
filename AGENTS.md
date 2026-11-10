@@ -1,6 +1,6 @@
 # AGENTS.md
 
-这是一个 Surge 面板脚本，用来分账号查询多个 GCP 账号本月的 Vision / Translate 调用次数和计费量，以及 Compute Engine 的免费/收费流量。原理和规则见 `README.md`。
+这是一个 Surge 面板脚本，用来分账号查询多个 GCP 账号本月的 Vision / Translate 调用次数和计费量，以及外部出站流量（实时）和 Compute Engine 的免费/收费流量（账单）。原理和规则见 `README.md`。
 
 ## 要引导用户部署或新增账号
 

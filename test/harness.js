@@ -146,6 +146,13 @@ function tokenRoute(keys) {
         assert.ok(/^\d+s$/.test(u.searchParams.get("aggregation.alignmentPeriod")));
         const project = u.pathname.split("/")[3];
         if (project === "proj-b") return [403, { error: { message: "Permission monitoring.timeSeries.list denied" } }];
+        if (/vm_flow\/egress_bytes_count/.test(filter)) {
+          assert.match(filter, /remote_location_type="EXTERNAL"/);
+          assert.strictEqual(u.searchParams.get("aggregation.groupByFields"), "metric.labels.remote_location_type");
+          const gib = 2 ** 30;
+          const pt = (v) => ({ value: { int64Value: String(Math.round(v * gib)) } });
+          return [200, { timeSeries: [{ metric: { labels: { remote_location_type: "EXTERNAL" } }, points: [pt(10.5), pt(5.4)] }] }];
+        }
         if (/quota\/rate\/net_usage/.test(filter)) {
           assert.strictEqual(u.searchParams.get("aggregation.groupByFields"), "metric.labels.quota_metric");
           const q = (m, v) => ({ metric: { labels: { quota_metric: m } }, points: [{ value: { int64Value: String(v) } }] });
@@ -198,15 +205,16 @@ function tokenRoute(keys) {
   assert.strictEqual(r.result.icon, "cloud.fill");
   assert.strictEqual(r.result["icon-color"], "#FF3B30"); // 有超额 → 红
   assert.match(r.result.title, /^GCP · \$3\.35 · \d\d:\d\d$/); // 标题带本月费用合计
-  assert.match(c, /▸ 主号 · thru \d\d-\d\d \d\d:\d\d\n▰▰▰▰▰‼ Vision 1,200 \/ 1,000\n/); // 只统计文档识别（label_detection 不计），超额时末格为 ‼；不显示调用次数
-  assert.match(c, /▰▱▱▱▱▱ Translate 5\.6K \/ 500K\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格
-  assert.match(c, /Cost: Vision \$0\.75\n▰▱▱▱▱▱ Free 14\.6G \/ 200G\nPaid 0\.01G · \$0\.0004\n/); // Free 只算标准层出站；Paid 为对等互连
+  assert.match(c, /▸ 主号\nVision 1,200 \/ 1,000 ▰▰▰▰ ‼\n/); // 只统计文档识别（label_detection 不计），超额时进度条填满、百分比换成 ‼；不显示调用次数；账号行不带截止时间
+  assert.match(c, /\nTranslate 5\.6K \/ 500K ▰▱▱▱ 1%\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格、至少 1%
+  // Traffic 是 Monitoring 的外部出站（多个点求和）；缩进的 Free / Paid 和截止时间来自账单
+  assert.match(c, /Cost: Vision \$0\.75\nTraffic 15\.9G\n  Free 14\.6G \/ 200G ▰▱▱▱ 7%\n  Paid 0\.01G · \$0\.0004\n  账单截至 \d\d-\d\d \d\d:\d\d\n/); // Free 只算标准层出站；Paid 为对等互连
   assert.match(bqSql, /MAX\(usage_end_time\) AS usage_end FROM m\)/); // 截止时间取整张表，不限服务
   assert.match(bqSql, /LEFT JOIN g ON TRUE/);
-  assert.match(c, /▸ 副号 · thru \d\d-\d\d \d\d:\d\d\n▱▱▱▱▱▱ Vision \? \/ 1,000\n▱▱▱▱▱▱ Translate \? \/ 500K\n/); // 数据缺失时进度条全空
-  assert.match(c, /Translate \? \/ 500K\n▰▰▰▰▰‼ Free 231G \/ 200G\nPaid 30\.5G · \$2\.60\n/); // 标准出站超额计入 Paid
-  assert.match(c, /\n\n⚠ 用量：无权限（副号）$/); // 截止时间在各账号标题上，页脚不再显示
-  assert.doesNotMatch(c, /账单截至/);
+  assert.match(c, /▸ 副号\nVision \? \/ 1,000 ▱▱▱▱\nTranslate \? \/ 500K ▱▱▱▱\nTraffic \?\n/); // 数据缺失时进度条全空、不显示百分比
+  assert.match(c, /Traffic \?\n  Free 231G \/ 200G ▰▰▰▰ ‼\n  Paid 30\.5G · \$2\.60\n  账单截至 /); // 标准出站超额计入 Paid
+  assert.match(c, /\n\n⚠ 用量：无权限（副号）$/);
+  assert.doesNotMatch(c, /thru/);
   for (const line of (r.result.title + "\n" + c).split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
   assert.ok(r.notified, "notify=1 应推送通知");
   console.log("✓ 双账号流程、流量分类、部分失败显示");
@@ -234,7 +242,7 @@ function tokenRoute(keys) {
     assert.strictEqual(r3.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
     assert.doesNotMatch(r3.result.content, /密钥无效|⚠/);
     assert.match(r3.result.content, /Vision 1,200 \/ 1,000/);
-    assert.match(r3.result.content, /\n▰▱▱▱▱▱ Free 14\.6G \/ 200G/);
+    assert.match(r3.result.content, /\n  Free 14\.6G \/ 200G ▰▱▱▱ 7%/);
     assert.strictEqual(JSON.parse(store.get(cacheKey)).token, "tok-" + k1.json.client_email);
     console.log("✓ token 失效时自动重新签发");
   }
@@ -256,20 +264,22 @@ function tokenRoute(keys) {
     let s = ctx.summarizeBilling([row("Oregon", 150, 0), row("Iowa", 150, 0)]);
     assert.deepStrictEqual([s.stdGiB, s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [300, 0, 300, 0, 0]);
     s.usageEnd = 1;
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n▰▰▰▰▰▰ Free 300G \/ 200G\n/); // 账单为 0 时不标 ‼
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n  Free 300G \/ 200G ▰▰▰▰ 150%\n/); // 账单为 0 时不标 ‼
     // 截止时间按手机本地时间显示，取所有行中最晚的 usage_end
     const end = new Date(2026, 10, 10, 13, 0).getTime() / 1000;
     s = ctx.summarizeBilling([{ ...row("Oregon", 1, 0), usage_end: String(end) }, { ...row("Iowa", 1, 0), usage_end: String(end - 3600) }]);
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /^▸ x · thru 11-10 13:00\n[^]*\n▰▱▱▱▱▱ Free 2\.00G \/ 200G\n/);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s, trafficGiB: 2.5 }, []), /^▸ x\n[^]*\nTraffic 2\.50G\n  Free 2\.00G \/ 200G ▰▱▱▱ 1%\n  Paid 0G · \$0\.00\n  账单截至 11-10 13:00$/);
     // 本月还没有账单数据：LEFT JOIN 返回一行全空，显示「暂无账单」而不是 0G
     s = ctx.summarizeBilling([{ service: null, sku: null, unit: null, qty: null, cost: null, free_credit: null, other_credit: null, currency: null, usage_end: null }]);
     assert.strictEqual(s.usageEnd, 0);
-    const empty = ctx.renderAccount({ acc: { name: "x" }, billing: s }, []);
-    assert.match(empty, /\nTraffic: 本月暂无账单$/);
-    assert.doesNotMatch(empty, /Free|Paid|thru/);
+    const empty = ctx.renderAccount({ acc: { name: "x" }, billing: s, trafficGiB: 5.68 }, []);
+    assert.match(empty, /\nTraffic 5\.68G\n  Free \/ Paid: 本月暂无账单$/);
+    assert.doesNotMatch(empty, /账单截至|G \/ 200G/);
+    // 账单查询失败：Traffic 下不显示 Free / Paid（问题在页脚提示）
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billingError: new Error("x"), trafficGiB: 0 }, []), /\nTraffic 0G$/);
     // 只有其他服务的记录（三类服务都没有）：有截止时间，流量为 0
     s = ctx.summarizeBilling([{ service: null, usage_end: String(end) }]);
-    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /^▸ x · thru 11-10 13:00\n[^]*\n▱▱▱▱▱▱ Free 0G \/ 200G\nPaid 0G · \$0\.00$/);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n  Free 0G \/ 200G ▱▱▱▱ 0%\n  Paid 0G · \$0\.00\n  账单截至 11-10 13:00$/);
     // 一个区域 250、另一个 50，有费用 → 只有超出的 50 收费
     s = ctx.summarizeBilling([row("Oregon", 250, 4.25), row("Iowa", 50, 0)]);
     assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [50, 250, 50, 4.25]);
@@ -281,18 +291,21 @@ function tokenRoute(keys) {
     assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [0, 120, 0, 1.2]);
     console.log("✓ 标准层出站按账单判断是否收费");
 
-    // 进度条：有用量至少 1 格、四舍五入、超额末格为 ‼、数据缺失全空
-    assert.strictEqual(ctx.bar(1, 1000, false), "▰▱▱▱▱▱");
-    assert.strictEqual(ctx.bar(640, 1000, false), "▰▰▰▰▱▱");
-    assert.strictEqual(ctx.bar(1000, 1000, false), "▰▰▰▰▰▰");
-    assert.strictEqual(ctx.bar(1200, 1000, true), "▰▰▰▰▰‼");
-    assert.strictEqual(ctx.bar(null, 1000, false), "▱▱▱▱▱▱");
+    // 进度条 + 百分比：有用量至少 1 格、至少 1%；格数和百分比都向下取整；用完时填满并换成 ‼；数据缺失全空、无百分比
+    assert.strictEqual(ctx.meter(1, 1000, false), "▰▱▱▱ 1%");
+    assert.strictEqual(ctx.meter(640, 1000, false), "▰▰▱▱ 64%");
+    assert.strictEqual(ctx.meter(999, 1000, false), "▰▰▰▱ 99%");
+    assert.strictEqual(ctx.meter(0, 1000, false), "▱▱▱▱ 0%");
+    assert.strictEqual(ctx.meter(1200, 1000, true), "▰▰▰▰ ‼");
+    assert.strictEqual(ctx.meter(null, 1000, false), "▱▱▱▱");
+    // API 用量刚好等于额度也算用完
+    assert.match(ctx.apiLine({ quota: { "vision.googleapis.com/document_text_detection_requests": 1000 } }, "vision", "Vision"), /^Vision 1,000 \/ 1,000 ▰▰▰▰ ‼$/);
 
     // 用量为 0 的 API 也显示，进度条全空
     const zeroQuota = { "vision.googleapis.com/document_text_detection_requests": 0, "translate.googleapis.com/default": 0 };
-    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: zeroQuota }, []), "▸ x\n▱▱▱▱▱▱ Vision 0 / 1,000\n▱▱▱▱▱▱ Translate 0 / 500K");
+    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: zeroQuota, trafficGiB: 0 }, []), "▸ x\nVision 0 / 1,000 ▱▱▱▱ 0%\nTranslate 0 / 500K ▱▱▱▱ 0%\nTraffic 0G");
     const someQuota = { ...zeroQuota, "translate.googleapis.com/default": 312000 };
-    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: someQuota }, []), "▸ x\n▱▱▱▱▱▱ Vision 0 / 1,000\n▰▰▰▰▱▱ Translate 312K / 500K");
+    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: someQuota, trafficGiB: 0 }, []), "▸ x\nVision 0 / 1,000 ▱▱▱▱ 0%\nTranslate 312K / 500K ▰▰▱▱ 62%\nTraffic 0G");
 
     // 图标颜色：正常绿；用量 ≥ 80% / 有费用 / 数据缺失橙；超额 / 认证失败红
     s = ctx.summarizeBilling([row("Oregon", 10, 0)]);
@@ -304,9 +317,19 @@ function tokenRoute(keys) {
     assert.strictEqual(ctx.panelLevel([{ acc, quota: { ...zeroQuota, "translate.googleapis.com/default": 600000 }, billing: s }]), 2);
     assert.strictEqual(ctx.panelLevel([{ acc, error: new Error("x") }]), 2);
 
-    // 最长的行（超额 + 7 位数字）也不超过面板宽度
-    const longest = ctx.renderAccount({ acc: { name: "account-name" }, quota: { "vision.googleapis.com/document_text_detection_requests": 1234567, "translate.googleapis.com/default": 123456789 } }, []);
-    for (const line of longest.split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
+    // 最长的行也不超过面板宽度：超额 + 7 位数字、两位数百分比、标准出站超过 200G 但未收费（三位数百分比）、大额收费流量
+    const wide = [
+      { "vision.googleapis.com/document_text_detection_requests": 1234567, "translate.googleapis.com/default": 123456789 },
+      { "vision.googleapis.com/document_text_detection_requests": 999, "translate.googleapis.com/default": 499999 },
+      { "vision.googleapis.com/document_text_detection_requests": 99999, "translate.googleapis.com/default": 9876 },
+    ];
+    const bills = [ctx.summarizeBilling([row("Oregon", 999, 0)]), ctx.summarizeBilling([row("Oregon", 1999, 299.99)])];
+    for (const quota of wide)
+      for (const billing of bills) {
+        billing.usageEnd = end;
+        const text = ctx.renderAccount({ acc: { name: "account-name" }, quota, billing, trafficGiB: 1234.5 }, []);
+        for (const line of text.split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
+      }
     console.log("✓ 进度条、零用量显示、图标状态色");
   }
 
