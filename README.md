@@ -5,7 +5,7 @@
 ```
 GCP 用量 · 11月 · 13:41
 ▸ main
-Vision 19/1K
+Vision 19/1,000
 Translate 5.8K/500K
 Cost Vision $0.75
 Traffic Free 14.6G/200G
@@ -18,7 +18,7 @@ Traffic Paid 0.01G/$0.0004
 账单截至 11-10 13:00
 ```
 
-- 每个 API 一行：「已用 / 免费额度」，口径见下方「免费额度配置」。数字用英文缩写，保留一位小数，例如 4.3K、500K、1.2M。用量超过额度时，行首会标出「‼」。不显示调用次数；只有 `basis` 设为 `calls` 或没设额度时，才会查询并显示「N 次」。
+- 每个 API 一行：「已用 / 免费额度」，口径见下方「免费额度配置」。Vision 显示完整数字（如 19/1,000）；Translate 数字较大，用英文缩写，保留一位小数（如 4.3K/500K、1.2M），由 `FREE_QUOTA` 里的 `compact` 控制。用量超过额度时，行首会标出「‼」。不显示调用次数；只有 `basis` 设为 `calls` 或没设额度时，才会查询并显示「N 次」。
 - 「Cost」这一行是 Vision / Translate 的净费用，只在金额 ≥ $0.01 时才显示。
 - 流量两行：
   - 「Traffic Free」：本月标准层互联网出站流量（所有区域合计） / 每月 200 GiB 免费额度。单位 G 即 GiB。账单确认有超额收费时，行首标「‼」。入站等其他免费流量不显示。
@@ -51,7 +51,7 @@ const FREE_QUOTA = {
   // 只统计文档文字识别（DOCUMENT_TEXT_DETECTION），每个功能每月前 1,000 单位免费
   vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
   // 每月前 50 万字符免费，包括语言检测
-  translate: { limit: 500000, unit: "", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
+  translate: { limit: 500000, unit: "", compact: true, basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 ```
 

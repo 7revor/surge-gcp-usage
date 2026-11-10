@@ -34,14 +34,14 @@ const ACCOUNTS = [
 // </config>
 
 // 免费额度（每个结算账号每月），可按需修改：
-//   limit  免费额度；unit  显示单位
+//   limit  免费额度；unit  显示单位；compact  为 true 时数字用 K/M 缩写（如 4.3K/500K），否则显示完整数字（如 19/1,000）
 //   basis  统计口径："quota" 按 quotaMetric 指定的配额用量（近实时）；"calls" 按 API 调用次数（近实时）；
 //          "billing" 按账单计费量（延迟数小时）
 const FREE_QUOTA = {
   // Vision：每个功能每月前 1,000 单位免费；这里只统计文档文字识别（DOCUMENT_TEXT_DETECTION）
   vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
   // Translate：每月前 50 万字符免费；配额「发送到通用模型的字符数」，含语言检测，不含 Translation LLM / 自定义模型
-  translate: { limit: 500000, unit: "", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
+  translate: { limit: 500000, unit: "", compact: true, basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 const BILLING_TZ = "America/Los_Angeles"; // 账单月按太平洋时间划分
@@ -338,7 +338,7 @@ function renderAccount(b, issues) {
   return lines.join("\n");
 }
 
-/** 例：「Vision 19/1K」「Translate 5.6K/500K」，超额时行首加 ‼；没设额度时显示「Vision 20 次」 */
+/** 例：「Vision 19/1,000」「Translate 5.6K/500K」（compact 时用 K/M 缩写），超额时行首加 ‼；没设额度时显示「Vision 20 次」 */
 function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
   const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
@@ -352,7 +352,8 @@ function apiLine(b, key, label) {
   } else {
     used = callsN;
   }
-  const line = `${label} ${used === null ? "?" : fmtBig(used)}/${fmtBig(q.limit)}${q.unit ? " " + q.unit : ""}`;
+  const fmt = q.compact ? fmtBig : fmtNum;
+  const line = `${label} ${used === null ? "?" : fmt(used)}/${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
   return used !== null && used > q.limit ? "‼ " + line : line;
 }
 
@@ -383,6 +384,10 @@ function fmtBig(v) {
   const k = (v / 1e3).toFixed(1);
   if (Number(k) < 1000) return k.replace(/\.0$/, "") + "K";
   return (v / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+}
+/** 完整数字，千分位，例：19 / 1,000 / 12.50 */
+function fmtNum(v) {
+  return Number.isInteger(v) ? fmtInt(v) : v.toFixed(2);
 }
 function fmtInt(v) {
   return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");

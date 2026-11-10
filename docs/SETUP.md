@@ -233,7 +233,7 @@ node test/live.js                # 用真实接口跑一次面板
 
 `live.js` 的预期输出：
 
-- 每个账号都有 `Vision 已用/1K` 和 `Translate 已用/500K` 两行。这两行的数据来自 Monitoring，开启账单导出前就能看到。
+- 每个账号都有 `Vision 已用/1,000` 和 `Translate 已用/500K` 两行。这两行的数据来自 Monitoring，开启账单导出前就能看到。
 - 导出表还没生成时，底部会显示「⚠ 账单：数据未就绪」，这是正常的。
 - 表生成之后，会出现「Traffic Free」「Traffic Paid」「账单截至」几行。
 
