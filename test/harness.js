@@ -197,10 +197,9 @@ function tokenRoute(keys) {
   assert.strictEqual(r.result.icon, undefined);
   assert.match(c, /▸ 主号\n‼ Vision 1,234 次 · 1,200\/1,000\n/); // 只统计文档识别（label_detection 不计），超额加 ‼
   assert.match(c, /Translate 56 次 · 5,633\/50万字符\n/); // 字符数来自配额指标，不用账单
-  assert.match(c, /免费流量 29\.9 GiB · 出站 14\.6\/200\n/); // 0.67+14.25+0.2+14.59+0.19
-  assert.match(c, /收费流量 0\.01 GiB（对等互连）\n费用 Vision \$0\.75\n/); // 流量 $0.0004 < 0.01 不计
+  assert.match(c, /Cost Vision \$0\.75\nTraffic\nFree 14\.6\/200 GiB\nPaid 0\.01 GiB\/\$0\.0004\n/); // Free 只算标准层出站；Paid 为对等互连
   assert.match(c, /▸ 副号\nVision \? 次 · \?\/1,000\nTranslate \? 次 · \?\/50万字符\n/);
-  assert.match(c, /免费流量 200 GiB · 出站 231\/200\n收费流量 30\.5 GiB（标准出站超额）\n费用 流量 \$2\.60/);
+  assert.match(c, /Translate \? 次 · \?\/50万字符\nTraffic\n‼ Free 231\/200 GiB\nPaid 30\.5 GiB\/\$2\.60\n/); // 标准出站超额计入 Paid
   assert.match(c, /\n\n⚠ 调用量：无权限（副号）\n账单截至 \d\d-\d\d \d\d:\d\d$/);
   for (const line of (r.result.title + "\n" + c).split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
   assert.ok(r.notified, "notify=1 应推送通知");
@@ -229,7 +228,7 @@ function tokenRoute(keys) {
     assert.strictEqual(r3.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
     assert.doesNotMatch(r3.result.content, /密钥无效|⚠/);
     assert.match(r3.result.content, /Vision 1,234 次/);
-    assert.match(r3.result.content, /免费流量 29\.9 GiB/);
+    assert.match(r3.result.content, /Free 14\.6\/200 GiB/);
     assert.strictEqual(JSON.parse(store.get(cacheKey)).token, "tok-" + k1.json.client_email);
     console.log("✓ token 失效时自动重新签发");
   }
@@ -249,16 +248,17 @@ function tokenRoute(keys) {
     });
     // 两个区域各 150：合计超过 200，但账单为 0 → 全部免费
     let s = ctx.summarizeBilling([row("Oregon", 150, 0), row("Iowa", 150, 0)]);
-    assert.deepStrictEqual([s.stdGiB, s.freeGiB, s.paidGiB, s.paidItems.length], [300, 300, 0, 0]);
+    assert.deepStrictEqual([s.stdGiB, s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [300, 0, 300, 0, 0]);
+    assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\nFree 300\/200 GiB\n/); // 账单为 0 时不标 ‼
     // 一个区域 250、另一个 50，有费用 → 只有超出的 50 收费
     s = ctx.summarizeBilling([row("Oregon", 250, 4.25), row("Iowa", 50, 0)]);
-    assert.deepStrictEqual([s.freeGiB, s.paidGiB, s.paidCost, s.paidItems[0].name], [250, 50, 4.25, "标准出站超额"]);
+    assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [50, 250, 50, 4.25]);
     // 每个区域都没超过 200，但账单有费用 → 按合计算超额
     s = ctx.summarizeBilling([row("Oregon", 150, 5), row("Iowa", 150, 3.5)]);
     assert.deepStrictEqual([s.freeGiB, s.paidGiB, s.paidCost], [200, 100, 8.5]);
     // 没超过 200 但账单有费用 → 费用不能丢
     s = ctx.summarizeBilling([row("Oregon", 120, 1.2)]);
-    assert.deepStrictEqual([s.freeGiB, s.paidGiB, s.paidCost, s.paidItems[0].name], [120, 0, 1.2, "标准出站"]);
+    assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [0, 120, 0, 1.2]);
     console.log("✓ 标准层出站按账单判断是否收费");
   }
 

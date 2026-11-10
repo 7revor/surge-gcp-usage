@@ -223,9 +223,9 @@ function summarizeBilling(rows) {
     translate: { qty: 0, unit: "", net: 0 },
     freeGiB: 0,
     stdGiB: 0,
+    stdOverGiB: 0,
     paidGiB: 0,
     paidCost: 0,
-    paidItems: [],
   };
   let stdCost = 0;
   let stdOverByRegion = 0; // 每个 SKU 对应一个区域
@@ -249,7 +249,7 @@ function summarizeBilling(rows) {
     const sku = r.sku;
     const isOut = /\bout\b|egress/i.test(sku);
     if (/peering|interconnect/i.test(sku) && isOut) {
-      addPaid(s, sku, qty, cost + freeCredit);
+      addPaid(s, qty, cost + freeCredit);
     } else if (/standard/i.test(sku) && /internet/i.test(sku) && isOut) {
       s.stdGiB += qty;
       stdCost += cost + freeCredit;
@@ -257,7 +257,7 @@ function summarizeBilling(rows) {
     } else if (/\bin\b|ingress/i.test(sku) && !isOut) {
       s.freeGiB += qty;
     } else if (cost + freeCredit > 1e-9) {
-      addPaid(s, sku, qty, cost + freeCredit);
+      addPaid(s, qty, cost + freeCredit);
     } else {
       s.freeGiB += qty;
     }
@@ -266,28 +266,15 @@ function summarizeBilling(rows) {
   // 这样多个区域合计超过 200 GiB 但账单为 0 时不会误报，有费用时也不会漏掉。
   const stdPaid = stdCost > 1e-9;
   const stdOver = stdPaid ? stdOverByRegion || Math.max(0, s.stdGiB - STANDARD_FREE_GIB) : 0;
+  s.stdOverGiB = stdOver;
   s.freeGiB += s.stdGiB - stdOver;
-  if (stdPaid) addPaid(s, stdOver > 0 ? "标准出站超额" : "标准出站", stdOver, stdCost);
-  s.paidItems.sort((a, b) => b.gib - a.gib);
+  if (stdPaid) addPaid(s, stdOver, stdCost);
   return s;
 }
 
-function addPaid(s, sku, gib, cost) {
+function addPaid(s, gib, cost) {
   s.paidGiB += gib;
   s.paidCost += cost;
-  const name = shortSku(sku);
-  const item = s.paidItems.find((i) => i.name === name);
-  if (item) {
-    item.gib += gib;
-    item.cost += cost;
-  } else s.paidItems.push({ name, gib, cost });
-}
-
-function shortSku(sku) {
-  if (/peering/i.test(sku)) return "对等互连";
-  if (/CDN Interconnect/i.test(sku)) return "CDN 互连";
-  const s = sku.replace(/^Network\s+/i, "").replace(/Data Transfer\s+/i, "");
-  return s.length > 12 ? s.slice(0, 12) + "…" : s;
 }
 
 // ============================================================
@@ -329,17 +316,16 @@ function renderAccount(b, issues) {
 
   const bill = b.billing;
   if (bill) {
-    lines.push(`免费流量 ${gib(bill.freeGiB)} · 出站 ${fmtG(bill.stdGiB)}/${STANDARD_FREE_GIB}`);
-    let paid = `收费流量 ${gib(bill.paidGiB)}`;
-    if (bill.paidItems.length === 1) paid += `（${bill.paidItems[0].name}）`;
-    lines.push(paid);
-    if (bill.paidItems.length > 1) for (const it of bill.paidItems.slice(0, 3)) lines.push(`  · ${it.name} ${gib(it.gib)}`);
-
+    // Vision / Translate 净费用：只在 ≥ $0.01 时显示
     const costs = [];
-    if (bill.paidCost >= 0.01) costs.push(`流量 ${money(bill.paidCost, bill.currency)}`);
     if (bill.vision.net >= 0.01) costs.push(`Vision ${money(bill.vision.net, bill.currency)}`);
     if (bill.translate.net >= 0.01) costs.push(`Translate ${money(bill.translate.net, bill.currency)}`);
-    if (costs.length) lines.push(`费用 ${costs.join(" · ")}`);
+    if (costs.length) lines.push(`Cost ${costs.join(" · ")}`);
+
+    // Free：标准层出站 / 免费额度，账单确认有超额收费时行首加 ‼；Paid：收费流量 / 流量费用
+    const free = `Free ${fmtG(bill.stdGiB)}/${STANDARD_FREE_GIB} GiB`;
+    lines.push("Traffic", bill.stdOverGiB > 0 ? "‼ " + free : free);
+    lines.push(`Paid ${gib(bill.paidGiB)}/${money(bill.paidCost, bill.currency)}`);
   }
   return lines.join("\n");
 }
@@ -374,6 +360,7 @@ function shortErr(e) {
 }
 
 function money(v, cur) {
+  cur = cur || "USD"; // 账单尚无数据时没有币种，按美元显示
   const sym = { USD: "$", CNY: "¥", HKD: "HK$", EUR: "€", JPY: "¥" }[cur];
   const n = Math.abs(v) < 0.005 && v !== 0 ? v.toFixed(4) : v.toFixed(2);
   return sym ? sym + n : `${n} ${cur || ""}`.trim();
