@@ -35,12 +35,13 @@ const ACCOUNTS = [
 
 // 免费额度（每个结算账号每月），可按需修改：
 //   limit  免费额度；unit  显示单位
-//   basis  "calls" 按 Monitoring 调用次数（实时）；"billing" 按账单计费量（延迟数小时）
+//   basis  统计口径："quota" 按 quotaMetric 指定的配额用量（近实时）；"calls" 按 API 调用次数（近实时）；
+//          "billing" 按账单计费量（延迟数小时）
 const FREE_QUOTA = {
-  // Vision：每个功能每月前 1,000 单位免费；一次请求处理一张图、一个功能 = 1 单位，这里用调用次数近似
-  vision: { limit: 1000, unit: "次", basis: "calls" },
-  // Translate：每月前 50 万字符免费（Basic / Advanced NMT），按账单计费字符数统计
-  translate: { limit: 500000, unit: "字符", basis: "billing" },
+  // Vision：每个功能每月前 1,000 单位免费；这里只统计文档文字识别（DOCUMENT_TEXT_DETECTION）
+  vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
+  // Translate：每月前 50 万字符免费；配额「发送到通用模型的字符数」，含语言检测，不含 Translation LLM / 自定义模型
+  translate: { limit: 500000, unit: "字符", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 const BILLING_TZ = "America/Los_Angeles"; // 账单月按太平洋时间划分
@@ -64,14 +65,25 @@ async function queryAccount(acc, period, now) {
   const token = await getAccessToken(acc.key);
   const projects = acc.projects && acc.projects.length ? acc.projects : [acc.key.project_id];
   const [mon, bill] = await Promise.all([
-    Promise.all(projects.map((p) => apiRequestCounts(token, p, period.start, now)))
-      .then((list) => ({ ok: mergeCounts(list) }))
+    Promise.all(
+      projects.map((p) =>
+        Promise.all([apiRequestCounts(token, p, period.start, now), quotaUsage(token, p, period.start, now)])
+      )
+    )
+      .then((list) => ({ ok: { counts: mergeCounts(list.map((x) => x[0])), quota: mergeCounts(list.map((x) => x[1])) } }))
       .catch((e) => ({ err: e })),
     queryBilling(token, acc, period.month)
       .then((rows) => ({ ok: summarizeBilling(rows) }))
       .catch((e) => ({ err: e })),
   ]);
-  return { acc, counts: mon.ok, monitorError: mon.err, billing: bill.ok, billingError: bill.err };
+  return {
+    acc,
+    counts: mon.ok && mon.ok.counts,
+    quota: mon.ok && mon.ok.quota,
+    monitorError: mon.err,
+    billing: bill.ok,
+    billingError: bill.err,
+  };
 }
 
 // ============================================================
@@ -80,10 +92,23 @@ async function queryAccount(acc, period, now) {
 
 const SERVICES = { vision: "vision.googleapis.com", translate: "translate.googleapis.com" };
 
-async function apiRequestCounts(token, project, start, end) {
+function apiRequestCounts(token, project, start, end) {
   const filter =
     'metric.type="serviceruntime.googleapis.com/api/request_count" AND resource.type="consumed_api" AND ' +
     `resource.labels.service=one_of("${SERVICES.vision}","${SERVICES.translate}")`;
+  return sumSeries(token, project, filter, "resource.labels.service", start, end);
+}
+
+/** 配额用量：Translate 字符数、Vision 各功能单位数，按 quota_metric 汇总 */
+function quotaUsage(token, project, start, end) {
+  const filter =
+    'metric.type="serviceruntime.googleapis.com/quota/rate/net_usage" AND resource.type="consumer_quota" AND ' +
+    `resource.labels.service=one_of("${SERVICES.vision}","${SERVICES.translate}")`;
+  return sumSeries(token, project, filter, "metric.labels.quota_metric", start, end);
+}
+
+/** 对 [start, end] 区间求和，按 groupBy（如 resource.labels.service）分组 */
+async function sumSeries(token, project, filter, groupBy, start, end) {
   const seconds = Math.max(60, Math.ceil((end - start) / 1000));
   const base = {
     filter,
@@ -92,22 +117,23 @@ async function apiRequestCounts(token, project, start, end) {
     "aggregation.alignmentPeriod": seconds + "s",
     "aggregation.perSeriesAligner": "ALIGN_SUM",
     "aggregation.crossSeriesReducer": "REDUCE_SUM",
-    "aggregation.groupByFields": "resource.labels.service",
+    "aggregation.groupByFields": groupBy,
   };
-  const counts = {};
+  const [kind, , label] = groupBy.split(".");
+  const out = {};
   let pageToken = "";
   do {
     const q = Object.assign({}, base, pageToken ? { pageToken } : {});
     const res = await request("GET", `https://monitoring.googleapis.com/v3/projects/${encodeURIComponent(project)}/timeSeries?${qs(q)}`, token);
     for (const ts of res.timeSeries || []) {
-      const svc = ts.resource && ts.resource.labels && ts.resource.labels.service;
+      const k = ts[kind] && ts[kind].labels && ts[kind].labels[label];
       let sum = 0;
       for (const pt of ts.points || []) sum += Number(pt.value.int64Value || pt.value.doubleValue || 0);
-      counts[svc] = (counts[svc] || 0) + sum;
+      out[k] = (out[k] || 0) + sum;
     }
     pageToken = res.nextPageToken || "";
   } while (pageToken);
-  return counts;
+  return out;
 }
 
 function mergeCounts(list) {
@@ -231,18 +257,17 @@ function addPaid(s, sku, gib, cost) {
 }
 
 function shortSku(sku) {
-  const m = sku.match(/(Carrier|Direct) Peering/i);
-  if (m) return `${m[1]} Peering`;
-  if (/CDN Interconnect/i.test(sku)) return "CDN Interconnect";
+  if (/peering/i.test(sku)) return "对等互连";
+  if (/CDN Interconnect/i.test(sku)) return "CDN 互连";
   const s = sku.replace(/^Network\s+/i, "").replace(/Data Transfer\s+/i, "");
-  return s.length > 24 ? s.slice(0, 24) + "…" : s;
+  return s.length > 12 ? s.slice(0, 12) + "…" : s;
 }
 
 // ============================================================
 // 渲染
 // ============================================================
 
-// 面板宽度约 22 个汉字，每行尽量控制在此以内
+// 面板一行约 18.5 个汉字宽（ASCII 约 0.55 个汉字宽），每行尽量控制在此以内
 function render(blocks) {
   const issues = [];
   const body = blocks.map((b) => renderAccount(b, issues)).join("\n\n");
@@ -269,52 +294,56 @@ function renderAccount(b, issues) {
   const name = b.acc.name;
   const lines = [`▸ ${name}`];
   if (b.error) return lines.concat(`✗ ${shortErr(b.error)}`).join("\n");
-  if (b.monitorError) issues.push({ scope: "调用次数", msg: shortErr(b.monitorError), name });
+  if (b.monitorError) issues.push({ scope: "调用量", msg: shortErr(b.monitorError), name });
   if (b.billingError) issues.push({ scope: "账单", msg: shortErr(b.billingError), name });
 
-  lines.push(`Vision ${apiUsage(b, "vision")}`);
-  lines.push(`Translate ${apiUsage(b, "translate")}`);
+  lines.push(apiLine(b, "vision", "Vision"));
+  lines.push(apiLine(b, "translate", "Translate"));
 
   const bill = b.billing;
   if (bill) {
-    lines.push(`免费流量 ${gib(bill.freeGiB)}（出站 ${fmtNum(bill.stdGiB)}/${STANDARD_FREE_GIB}）`);
+    lines.push(`免费流量 ${gib(bill.freeGiB)} · 出站 ${fmtG(bill.stdGiB)}/${STANDARD_FREE_GIB}`);
     let paid = `收费流量 ${gib(bill.paidGiB)}`;
     if (bill.paidItems.length === 1) paid += `（${bill.paidItems[0].name}）`;
-    if (bill.paidCost >= 0.01) paid += ` · ${money(bill.paidCost, bill.currency)}`;
     lines.push(paid);
     if (bill.paidItems.length > 1) for (const it of bill.paidItems.slice(0, 3)) lines.push(`  · ${it.name} ${gib(it.gib)}`);
+
+    const costs = [];
+    if (bill.paidCost >= 0.01) costs.push(`流量 ${money(bill.paidCost, bill.currency)}`);
+    if (bill.vision.net >= 0.01) costs.push(`Vision ${money(bill.vision.net, bill.currency)}`);
+    if (bill.translate.net >= 0.01) costs.push(`Translate ${money(bill.translate.net, bill.currency)}`);
+    if (costs.length) lines.push(`费用 ${costs.join(" · ")}`);
   }
   return lines.join("\n");
 }
 
-/** 例：「20 / 1,000 次」「29 次 · 12.3万 / 50万 字符 · $1.20」 */
-function apiUsage(b, key) {
+/** 例：「Vision 20 次 · 19/1,000」「Translate 84 次 · 5,633/50万字符」，超额时行首加 ‼ */
+function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
   const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
-  const calls = callsN === null ? "?" : fmtInt(callsN);
-  const t = b.billing && b.billing[key];
-  const cost = t && t.net >= 0.01 ? ` · ${money(t.net, b.billing.currency)}` : "";
+  let line = `${label} ${callsN === null ? "?" : fmtInt(callsN)} 次`;
+  if (!q.limit) return line;
 
-  if (q.limit && q.basis === "billing") {
-    const used = t ? `${fmtBig(t.qty)} / ${fmtBig(q.limit)} ${q.unit}${overMark(t.qty, q.limit)}` : `额度 ${fmtBig(q.limit)} ${q.unit}`;
-    return `${calls} 次 · ${used}${cost}`;
+  let used = null;
+  if (q.basis === "quota") {
+    if (b.quota) used = b.quota[q.quotaMetric] || 0;
+  } else if (q.basis === "billing") {
+    if (b.billing) used = b.billing[key].qty;
+  } else {
+    used = callsN;
   }
-  if (q.limit) return `${calls} / ${fmtBig(q.limit)} ${q.unit}${overMark(callsN, q.limit)}${cost}`;
-  return `${calls} 次${cost}`;
-}
-
-function overMark(used, limit) {
-  return used !== null && used > limit ? " ‼超额" : "";
+  line += ` · ${used === null ? "?" : fmtBig(used)}/${fmtBig(q.limit)}${q.unit || ""}`;
+  return used !== null && used > q.limit ? "‼ " + line : line;
 }
 
 function shortErr(e) {
   const m = errMsg(e);
-  if (/does not match any table/.test(m)) return "导出表未生成，需等数小时";
+  if (/does not match any table/.test(m)) return "数据未就绪";
   if (/密钥未配置/.test(m)) return "服务账号密钥未配置";
   if (/invalid_grant|Invalid JWT|HTTP 401/i.test(m)) return "密钥无效";
-  if (/HTTP 403/.test(m)) return "无权限 (403)";
+  if (/HTTP 403/.test(m)) return "无权限";
   if (/timed? ?out|超时/i.test(m)) return "请求超时";
-  return m.length > 28 ? m.slice(0, 28) + "…" : m;
+  return m.length > 16 ? m.slice(0, 16) + "…" : m;
 }
 
 function money(v, cur) {
@@ -323,8 +352,9 @@ function money(v, cur) {
   return sym ? sym + n : `${n} ${cur || ""}`.trim();
 }
 
-const gib = (v) => `${fmtNum(v)} GiB`;
-const fmtNum = (v) => (v >= 100 ? v.toFixed(1) : v.toFixed(2));
+// 按数量级缩短小数：<10 两位，<100 一位，其余取整
+const fmtG = (v) => (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : v.toFixed(0));
+const gib = (v) => `${fmtG(v)} GiB`;
 /** ≥ 1 万时用「万」，例：1,000 / 12.3万 / 50万 */
 function fmtBig(v) {
   if (v < 10000) return Number.isInteger(v) ? fmtInt(v) : v.toFixed(2);

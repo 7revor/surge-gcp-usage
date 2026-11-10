@@ -3,23 +3,27 @@
 用一个 Surge 面板脚本，分账号查看多个 GCP 账号的本月用量。
 
 ```
-GCP 用量 · 11月 · 13:35
+GCP 用量 · 11月 · 13:41
 ▸ main
-Vision 20 / 1,000 次
-Translate 84 次 · 12.3万 / 50万 字符
-免费流量 29.90 GiB（出站 14.59/200）
-收费流量 0.01 GiB（Carrier Peering）
+Vision 20 次 · 19/1,000
+Translate 84 次 · 5,794/50万字符
+免费流量 29.9 GiB · 出站 14.6/200
+收费流量 0.01 GiB（对等互连）
+费用 Vision $0.75
 
 ▸ alt
 ...
 
-⚠ 调用次数：无权限 (403)（alt）
+⚠ 调用量：无权限（alt）
 账单截至 11-10 13:00
 ```
 
+- 每个 API 一行：先是本月调用次数，后面是「已用 / 免费额度」。用量超过额度时，行首会标出「‼」。
+- 「费用」这一行只在金额 ≥ $0.01 时才显示。
 - 面板图标使用 Surge 的 `info` 样式。
 - 多个账号出现相同的问题时，合并成底部一行提示。
 - 「账单截至」显示所有账号中最早的那个账单导出时间。
+- 一行大约能放 18.5 个汉字。测试会检查每一行有没有超出这个宽度。
 
 > **部署或新增账号**：按 [`docs/SETUP.md`](docs/SETUP.md) 一步步操作。这份手册是写给 Agent 用来引导用户的，每一步都有预期输出、分支判断和故障排查。Agent 的工作规则见 [`AGENTS.md`](AGENTS.md)。
 
@@ -41,14 +45,33 @@ Google 没有公开 API 能直接读取控制台的「账单报表」。Cloud Bi
 
 ```js
 const FREE_QUOTA = {
-  vision: { limit: 1000, unit: "次", basis: "calls" },        // 每个功能每月前 1,000 单位免费，用调用次数近似
-  translate: { limit: 500000, unit: "字符", basis: "billing" }, // 每月前 50 万字符免费，按账单计费字符数统计
+  // 只统计文档文字识别（DOCUMENT_TEXT_DETECTION），每个功能每月前 1,000 单位免费
+  vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
+  // 每月前 50 万字符免费，包括语言检测
+  translate: { limit: 500000, unit: "字符", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 ```
 
-- `basis: "calls"`：用 Monitoring 的调用次数和额度比较，数据是实时的。
-- `basis: "billing"`：用账单里的计费量和额度比较，数据会延迟几个小时。账单数据还没到时，只显示「额度 50万 字符」。
-- 用量超过额度时，会标记「‼超额」。
+`basis` 决定「已用」这个数从哪里来：
+
+| 取值 | 含义 | 时效 |
+|---|---|---|
+| `quota` | 读取 Cloud Monitoring 里 `serviceruntime.googleapis.com/quota/rate/net_usage` 这项指标中，由 `quotaMetric` 指定的那个配额的用量 | 近实时 |
+| `calls` | 直接用 API 调用次数 | 近实时 |
+| `billing` | 用账单里的计费量 | 延迟数小时 |
+
+我在真实项目里查到的配额指标：
+
+| 配额指标 | 计量单位 |
+|---|---|
+| `translate.googleapis.com/default` | 发送到通用模型的字符数（v2/v3），`translateText` 和 `detectLanguage` 都计入，空格也算 |
+| `translate.googleapis.com/default_requests_legacy` | 请求数 |
+| `vision.googleapis.com/<功能>_requests` | 各功能的使用单位数，例如 `document_text_detection_requests` |
+| `vision.googleapis.com/default_requests` | 请求数 |
+
+说明：
+- 官方文档没有给出「配额指标 ID」和「配额名称」的对应关系。上表的计量单位是根据数值推断的：平均每次请求约 80 个字符，并且另有一项明显是请求数。
+- 想确认的话，可以在 Cloud Shell 执行：`gcloud alpha services quota list --service=translate.googleapis.com --consumer=projects/<项目ID>`
 
 ## 流量分类规则
 

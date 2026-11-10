@@ -39,10 +39,12 @@ const BILLING_ROWS = [
   ["Cloud Translation API", "Translation", "count", 123456, 2.47, 0, -2.47],
 ];
 
-// 显示宽度：全角字符计 2，其余计 1
+// 估算显示宽度（单位：汉字宽）：ASCII 约 0.55，其余（汉字、全角标点、符号）按 1
+// 依据：Mac 面板实测在「⚠️ 账单：导出表尚未生成（开启账单导」处折行，约 18.5 个汉字宽
+const PANEL_WIDTH = 18.5;
 function width(s) {
   let w = 0;
-  for (const ch of s) w += /[\u2E80-\uFFEF]/.test(ch) ? 2 : 1;
+  for (const ch of s) w += ch.charCodeAt(0) < 0x80 ? 0.55 : /[\uFE00-\uFE0F]/.test(ch) ? 0 : 1;
   return w;
 }
 
@@ -141,10 +143,27 @@ function tokenRoute(keys) {
       /monitoring\.googleapis\.com\/v3\/projects\/([^/]+)\/timeSeries/,
       ({ url }) => {
         const u = new URL(url);
-        assert.match(u.searchParams.get("filter"), /api\/request_count/);
+        const filter = u.searchParams.get("filter");
         assert.ok(/^\d+s$/.test(u.searchParams.get("aggregation.alignmentPeriod")));
         const project = u.pathname.split("/")[3];
         if (project === "proj-b") return [403, { error: { message: "Permission monitoring.timeSeries.list denied" } }];
+        if (/quota\/rate\/net_usage/.test(filter)) {
+          assert.strictEqual(u.searchParams.get("aggregation.groupByFields"), "metric.labels.quota_metric");
+          const q = (m, v) => ({ metric: { labels: { quota_metric: m } }, points: [{ value: { int64Value: String(v) } }] });
+          return [
+            200,
+            {
+              timeSeries: [
+                q("vision.googleapis.com/default_requests", 1240),
+                q("vision.googleapis.com/document_text_detection_requests", 1200),
+                q("vision.googleapis.com/label_detection_requests", 40),
+                q("translate.googleapis.com/default", 5633),
+                q("translate.googleapis.com/default_requests_legacy", 50),
+              ],
+            },
+          ];
+        }
+        assert.match(filter, /api\/request_count/);
         return [
           200,
           {
@@ -177,14 +196,14 @@ function tokenRoute(keys) {
   const c = r.result.content;
   assert.strictEqual(r.result.style, "info");
   assert.strictEqual(r.result.icon, undefined);
-  assert.match(c, /▸ 主号\nVision 1,234 \/ 1,000 次 ‼超额 · \$0\.75\n/);
-  assert.match(c, /Translate 56 次 · 12\.3万 \/ 50万 字符\n/); // 推广抵扣后净费用 0，不显示金额
-  assert.match(c, /免费流量 29\.90 GiB（出站 14\.59\/200）\n/); // 0.67+14.25+0.2+14.59+0.19
-  assert.match(c, /收费流量 0\.01 GiB（Carrier Peering）\n/); // $0.0004 < 0.01 不显示金额
-  assert.match(c, /▸ 副号\nVision \? \/ 1,000 次\nTranslate \? 次 · 0 \/ 50万 字符\n/);
-  assert.match(c, /免费流量 200\.0 GiB（出站 230\.5\/200）\n收费流量 30\.50 GiB（标准出站超额） · \$2\.60/);
-  assert.match(c, /\n\n⚠ 调用次数：无权限 \(403\)（副号）\n账单截至 \d\d-\d\d \d\d:\d\d$/);
-  for (const line of c.split("\n")) assert.ok(width(line) <= 44, "行过长: " + line);
+  assert.match(c, /▸ 主号\n‼ Vision 1,234 次 · 1,200\/1,000\n/); // 只统计文档识别（label_detection 不计），超额加 ‼
+  assert.match(c, /Translate 56 次 · 5,633\/50万字符\n/); // 字符数来自配额指标，不用账单
+  assert.match(c, /免费流量 29\.9 GiB · 出站 14\.6\/200\n/); // 0.67+14.25+0.2+14.59+0.19
+  assert.match(c, /收费流量 0\.01 GiB（对等互连）\n费用 Vision \$0\.75\n/); // 流量 $0.0004 < 0.01 不计
+  assert.match(c, /▸ 副号\nVision \? 次 · \?\/1,000\nTranslate \? 次 · \?\/50万字符\n/);
+  assert.match(c, /免费流量 200 GiB · 出站 231\/200\n收费流量 30\.5 GiB（标准出站超额）\n费用 流量 \$2\.60/);
+  assert.match(c, /\n\n⚠ 调用量：无权限（副号）\n账单截至 \d\d-\d\d \d\d:\d\d$/);
+  for (const line of (r.result.title + "\n" + c).split("\n")) assert.ok(width(line) <= PANEL_WIDTH, `行过长(${width(line)}): ${line}`);
   assert.ok(r.notified, "notify=1 应推送通知");
   console.log("✓ 双账号流程、流量分类、部分失败显示");
 
