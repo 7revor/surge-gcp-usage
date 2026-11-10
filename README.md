@@ -81,7 +81,7 @@ gcloud projects add-iam-policy-binding 其他项目ID --member=serviceAccount:$S
 
 ### 3. 填写配置
 
-复制一份 `gcp-usage.js` 到 Surge 配置所在目录（iCloud Drive/Surge）。然后编辑 `// <config>` 区块，每个账号写一项：
+复制一份 `gcp-usage.js` 到 Surge 配置目录下的 `js/` 子目录（iCloud Drive/Surge/js）。然后编辑 `// <config>` 区块，每个账号写一项：
 
 ```js
 const ACCOUNTS = [
@@ -100,14 +100,21 @@ const ACCOUNTS = [
 ### 4. Surge 配置
 
 ```ini
-[Panel]
-GCP用量 = script-name=gcp-usage, update-interval=3600
-
 [Script]
-gcp-usage = type=generic, script-path=gcp-usage.js, timeout=60
+gcp-usage = type=generic,timeout=60,script-path=js/gcp-usage.js
 # 可选：每天 9 点推送一次
-gcp-usage-notify = type=cron, cronexp="0 9 * * *", script-path=gcp-usage.js, timeout=60, argument=notify=1
+gcp-usage-notify = type=cron,cronexp="0 9 * * *",script-path=js/gcp-usage.js,timeout=60,argument=notify=1
+
+[Panel]
+GCP = title=GCP 用量,content=加载中,style=info,script-name=gcp-usage,update-interval=86400
 ```
+
+面板不会在后台刷新，只在两种情况下运行脚本：
+
+- 点面板上的刷新按钮：每次都会重新查询。
+- 打开面板所在页面时（iOS 是策略组选择页，Mac 是菜单栏的 Panels 子菜单），如果距上次刷新已超过 `update-interval` 秒，就自动刷新一次。
+
+`86400` 表示自动刷新最多一天一次。
 
 ## 注意
 
