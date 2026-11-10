@@ -40,16 +40,17 @@ const ACCOUNTS = [
 //          "billing" 按账单计费量（延迟数小时）
 const FREE_QUOTA = {
   // Vision：每个功能每月前 1,000 单位免费；这里只统计文档文字识别（DOCUMENT_TEXT_DETECTION）
-  vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
+  vision: { limit: 1000, unit: "", compact: true, basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
   // Translate：每月前 50 万字符免费；配额「发送到通用模型的字符数」，含语言检测，不含 Translation LLM / 自定义模型
   translate: { limit: 500000, unit: "", compact: true, basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 
 // 面板外观：
-//   有额度的行在末尾画进度条（▰ 已用 / ▱ 剩余）和百分比；用量达到额度时进度条填满，百分比换成 ‼
+//   标签都是两个汉字加全角冒号，宽度相同，紧跟其后的进度条（▰ 已用 / ▱ 剩余）因此自然对齐；
+//   百分比放在行尾，用量达到额度时进度条填满，百分比换成 ‼
 //   图标用 SF Symbol，颜色表示整体状态：正常绿；用量达到 WARN_RATIO、有费用或数据未就绪橙；超额或认证失败红
-const BAR_CELLS = 4; // 进度条格数；面板一行约 18.5 个汉字宽，4 格加百分比时最长的 Translate 行刚好放得下
+const BAR_CELLS = 6; // 进度条格数；面板一行约 17.4em 宽，6 格时最长的「翻译」行也放得下
 const WARN_RATIO = 0.8;
 const ICON = "cloud.fill";
 const ICON_COLOR = ["#34C759", "#FF9500", "#FF3B30"]; // 正常 / 注意 / 超额
@@ -371,7 +372,7 @@ function addPaid(s, gib, cost) {
 // 渲染
 // ============================================================
 
-// 面板一行约 18.5 个汉字宽（ASCII 约 0.55 个汉字宽），每行尽量控制在此以内
+// 面板一行约 17.4em 宽（系统字体），每行尽量控制在此以内
 function render(blocks) {
   const issues = [];
   const body = blocks.map((b) => renderAccount(b, issues)).join("\n\n");
@@ -393,51 +394,51 @@ function render(blocks) {
 
 function renderAccount(b, issues) {
   const name = b.acc.name;
-  if (b.error) return [`▸ ${name}`, `✗ ${shortErr(b.error)}`].join("\n");
+  if (b.error) return [`账号：${name}`, `✗ ${shortErr(b.error)}`].join("\n");
   if (b.monitorError) issues.push({ scope: "用量", msg: shortErr(b.monitorError), name });
   if (b.billingError) issues.push({ scope: "账单", msg: shortErr(b.billingError), name });
 
-  const lines = [`▸ ${name}`];
-  lines.push(apiLine(b, "vision", "Vision"));
-  lines.push(apiLine(b, "translate", "Translate"));
+  const lines = [`账号：${name}`];
+  lines.push(apiLine(b, "vision", "识图"));
+  lines.push(apiLine(b, "translate", "翻译"));
 
-  // Vision / Translate 净费用：只在 ≥ $0.01 时显示
+  // 识图 / 翻译净费用：只在 ≥ $0.01 时显示
   const bill = b.billing;
   if (bill) {
     const costs = [];
-    if (bill.vision.net >= 0.01) costs.push(`Vision ${money(bill.vision.net, bill.currency)}`);
-    if (bill.translate.net >= 0.01) costs.push(`Translate ${money(bill.translate.net, bill.currency)}`);
-    if (costs.length) lines.push(`Cost: ${costs.join(" · ")}`);
+    if (bill.vision.net >= 0.01) costs.push(`识图 ${money(bill.vision.net, bill.currency)}`);
+    if (bill.translate.net >= 0.01) costs.push(`翻译 ${money(bill.translate.net, bill.currency)}`);
+    if (costs.length) lines.push(`费用：${costs.join(" · ")}`);
   }
 
-  // Traffic：本月外部出站总量（Monitoring，实时）。下面缩进的 Free / Paid 来自账单，最后一行是账单统计截止时间
-  // （手机本地时间，表示此前的用量已计入），只对 Free / Paid 有效
-  lines.push(`Traffic ${b.trafficGiB == null ? "?" : gib(b.trafficGiB)}`);
+  // 流量：本月外部出站总量（Monitoring，实时）。下面缩进的免费 / 收费来自账单，最后一行是账单统计截止时间
+  // （手机本地时间，表示此前的用量已计入），只对免费 / 收费有效
+  lines.push(`流量：${b.trafficGiB == null ? "?" : gib(b.trafficGiB)}`);
   if (bill) {
     if (!bill.usageEnd) {
-      lines.push("  Free / Paid: 本月暂无账单");
+      lines.push("  免费 / 收费：本月暂无账单");
     } else {
-      // Free：标准层出站 / 免费额度，账单确认有超额收费时进度条填满、百分比换成 ‼；Paid：收费流量 · 流量费用
-      lines.push(`  Free ${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)} ${meter(bill.stdGiB, STANDARD_FREE_GIB, bill.stdOverGiB > 0)}`);
-      lines.push(`  Paid ${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
+      // 免费：标准层出站 / 免费额度，账单确认有超额收费时进度条填满、百分比换成 ‼；收费：收费流量 · 流量费用
+      lines.push(`  免费：${meter(bill.stdGiB, STANDARD_FREE_GIB, `${gib(bill.stdGiB)} / ${gib(STANDARD_FREE_GIB)}`, bill.stdOverGiB > 0)}`);
+      lines.push(`  收费：${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
       lines.push(`  账单截至 ${mmddhhmm(new Date(bill.usageEnd * 1000))}`);
     }
   }
   return lines.join("\n");
 }
 
-/** 例：「Vision 640 / 1,000 ▰▰▰▱ 64%」「Translate 0 / 500K ▱▱▱▱ 0%」（compact 时用 K/M 缩写）；没设额度时显示「Vision 20 次」 */
+/** 例：「识图：▰▰▰▱▱▱ 640 / 1K · 64%」「翻译：▱▱▱▱▱▱ 0 / 500K · 0%」（compact 时用 K/M 缩写）；没设额度时显示「识图：20 次」 */
 function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
   if (!q.limit) {
     const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
-    return `${label} ${callsN === null ? "?" : fmtInt(callsN)} 次`;
+    return `${label}：${callsN === null ? "?" : fmtInt(callsN)} 次`;
   }
   const used = apiUsed(b, key);
   // 完整数字到 6 位时行会超宽，改用 K/M 缩写
   const fmt = q.compact || (used || 0) >= 100000 ? fmtBig : fmtNum;
   const value = `${used === null ? "?" : fmt(used)} / ${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
-  return `${label} ${value} ${meter(used, q.limit, used !== null && used >= q.limit)}`;
+  return `${label}：${meter(used, q.limit, value, used !== null && used >= q.limit)}`;
 }
 
 /** 按 FREE_QUOTA[key].basis 取本月已用量；数据缺失时返回 null */
@@ -449,13 +450,13 @@ function apiUsed(b, key) {
 }
 
 /**
- * 行尾的进度条和百分比，例：「▰▰▰▱ 64%」。
+ * 进度条 + 数值 + 百分比，例：「▰▰▰▱▱▱ 640 / 1K · 64%」。
  * full（额度已用完或超额）时进度条填满、百分比换成 ‼；数据缺失时进度条全空、不显示百分比。
  */
-function meter(used, limit, full) {
-  if (full) return "▰".repeat(BAR_CELLS) + " ‼";
-  if (used === null || used === undefined) return "▱".repeat(BAR_CELLS);
-  return `${bar(used, limit)} ${percent(used, limit)}%`;
+function meter(used, limit, value, full) {
+  if (full) return `${"▰".repeat(BAR_CELLS)} ${value} ‼`;
+  if (used === null || used === undefined) return `${"▱".repeat(BAR_CELLS)} ${value}`;
+  return `${bar(used, limit)} ${value} · ${percent(used, limit)}%`;
 }
 
 /** 进度条：BAR_CELLS 格，和百分比一样向下取整（只有用完才填满），有用量时至少 1 格 */
@@ -489,8 +490,8 @@ function money(v, cur) {
   return sym ? sym + n : `${n} ${cur || ""}`.trim();
 }
 
-// 按数量级缩短小数：0 显示 0，<10 两位，<100 一位，其余取整
-const fmtG = (v) => (v === 0 ? "0" : v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : v.toFixed(0));
+// 按数量级缩短小数：0 显示 0，<10 两位，<100 一位，其余取整（按进位后的值判断，避免 99.97 显示成 100.0）
+const fmtG = (v) => (v === 0 ? "0" : v < 9.995 ? v.toFixed(2) : v < 99.95 ? v.toFixed(1) : v.toFixed(0));
 /** 流量，单位 GiB，写作 G，与 API 行的 K/M 风格一致，例：0G / 14.6G / 200G */
 const gib = (v) => `${fmtG(v)}G`;
 /** 英文缩写，不足 10 时保留一位小数，否则取整（保证进度条行不超宽），例：19 / 4.3K / 312K / 500K / 1.2M / 12M */

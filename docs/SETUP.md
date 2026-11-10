@@ -233,9 +233,9 @@ node test/live.js                # 用真实接口跑一次面板
 
 `live.js` 的预期输出：
 
-- 每个账号都有 `Vision: 已用/1,000` 和 `Translate: 已用/500K` 两行。这两行的数据来自 Monitoring，开启账单导出前就能看到。
+- 每个账号都有「识图：… 已用 / 1K」和「翻译：… 已用 / 500K」两行（识图即 Vision，翻译即 Translate）。这两行的数据来自 Monitoring，开启账单导出前就能看到。
 - 导出表还没生成时，底部会显示「⚠ 账单：数据未就绪」，这是正常的。
-- 表生成之后，「Traffic」下面会出现缩进的「Free」「Paid」和「账单截至」三行。刚开启导出时，GCP 会从上个月开始回填，本月数据还没补到时显示「Free / Paid: 本月暂无账单」，这是正常的，过几个小时再看。
+- 表生成之后，「流量」下面会出现缩进的「免费」「收费」和「账单截至」三行。刚开启导出时，GCP 会从上个月开始回填，本月数据还没补到时显示「免费 / 收费：本月暂无账单」，这是正常的，过几个小时再看。
 
 ---
 
@@ -262,8 +262,8 @@ node scripts/install-surge.js --conf dconf/General.dconf             # 正式安
 
 运行 `node test/live.js`，然后对照控制台「结算 → 报表」，按 SKU 分组、只看本月，逐项核对：
 
-- **Free**：已用量等于标准层互联网出站 SKU（`Network Standard Data Transfer Out to Internet ...`）的总和，额度是 200 GiB。
-- **Paid**：等于 Carrier Peering 出站 SKU、标准层出站超过 200 GiB 的部分，再加上其他扣除免费层抵扣后仍有费用的流量 SKU。
+- **免费**：已用量等于标准层互联网出站 SKU（`Network Standard Data Transfer Out to Internet ...`）的总和，额度是 200 GiB。
+- **收费**：等于 Carrier Peering 出站 SKU、标准层出站超过 200 GiB 的部分，再加上其他扣除免费层抵扣后仍有费用的流量 SKU。
 - 刚开启导出的头几天还在回填，数字可能偏低。
 
 ---
