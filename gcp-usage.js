@@ -41,7 +41,7 @@ const FREE_QUOTA = {
   // Vision：每个功能每月前 1,000 单位免费；这里只统计文档文字识别（DOCUMENT_TEXT_DETECTION）
   vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
   // Translate：每月前 50 万字符免费；配额「发送到通用模型的字符数」，含语言检测，不含 Translation LLM / 自定义模型
-  translate: { limit: 500000, unit: "字符", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
+  translate: { limit: 500000, unit: "", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 const BILLING_TZ = "America/Los_Angeles"; // 账单月按太平洋时间划分
@@ -331,14 +331,14 @@ function renderAccount(b, issues) {
     if (costs.length) lines.push(`Cost ${costs.join(" · ")}`);
 
     // Free：标准层出站 / 免费额度，账单确认有超额收费时行首加 ‼；Paid：收费流量 / 流量费用
-    const free = `Traffic Free ${fmtG(bill.stdGiB)}/${STANDARD_FREE_GIB} GiB`;
+    const free = `Traffic Free ${gib(bill.stdGiB)}/${gib(STANDARD_FREE_GIB)}`;
     lines.push(bill.stdOverGiB > 0 ? "‼ " + free : free);
     lines.push(`Traffic Paid ${gib(bill.paidGiB)}/${money(bill.paidCost, bill.currency)}`);
   }
   return lines.join("\n");
 }
 
-/** 例：「Vision 19/1,000」「Translate 5,633/50万字符」，超额时行首加 ‼；没设额度时显示「Vision 20 次」 */
+/** 例：「Vision 19/1K」「Translate 5.6K/500K」，超额时行首加 ‼；没设额度时显示「Vision 20 次」 */
 function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
   const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
@@ -352,7 +352,7 @@ function apiLine(b, key, label) {
   } else {
     used = callsN;
   }
-  const line = `${label} ${used === null ? "?" : fmtBig(used)}/${fmtBig(q.limit)}${q.unit || ""}`;
+  const line = `${label} ${used === null ? "?" : fmtBig(used)}/${fmtBig(q.limit)}${q.unit ? " " + q.unit : ""}`;
   return used !== null && used > q.limit ? "‼ " + line : line;
 }
 
@@ -373,13 +373,16 @@ function money(v, cur) {
   return sym ? sym + n : `${n} ${cur || ""}`.trim();
 }
 
-// 按数量级缩短小数：<10 两位，<100 一位，其余取整
-const fmtG = (v) => (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : v.toFixed(0));
-const gib = (v) => `${fmtG(v)} GiB`;
-/** ≥ 1 万时用「万」，例：1,000 / 12.3万 / 50万 */
+// 按数量级缩短小数：0 显示 0，<10 两位，<100 一位，其余取整
+const fmtG = (v) => (v === 0 ? "0" : v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : v.toFixed(0));
+/** 流量，单位 GiB，写作 G，与 API 行的 K/M 风格一致，例：0G / 14.6G / 200G */
+const gib = (v) => `${fmtG(v)}G`;
+/** 英文缩写，保留一位小数，例：19 / 4.3K / 500K / 1.2M */
 function fmtBig(v) {
-  if (v < 10000) return Number.isInteger(v) ? fmtInt(v) : v.toFixed(2);
-  return (v / 10000).toFixed(1).replace(/\.0$/, "") + "万";
+  if (v < 1000) return Number.isInteger(v) ? String(v) : v.toFixed(2);
+  const k = (v / 1e3).toFixed(1);
+  if (Number(k) < 1000) return k.replace(/\.0$/, "") + "K";
+  return (v / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
 }
 function fmtInt(v) {
   return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");

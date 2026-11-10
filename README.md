@@ -5,11 +5,11 @@
 ```
 GCP 用量 · 11月 · 13:41
 ▸ main
-Vision 19/1,000
-Translate 5,794/50万字符
+Vision 19/1K
+Translate 5.8K/500K
 Cost Vision $0.75
-Traffic Free 14.6/200 GiB
-Traffic Paid 0.01 GiB/$0.0004
+Traffic Free 14.6G/200G
+Traffic Paid 0.01G/$0.0004
 
 ▸ alt
 ...
@@ -18,10 +18,10 @@ Traffic Paid 0.01 GiB/$0.0004
 账单截至 11-10 13:00
 ```
 
-- 每个 API 一行：「已用 / 免费额度」，口径见下方「免费额度配置」。用量超过额度时，行首会标出「‼」。不显示调用次数；只有 `basis` 设为 `calls` 或没设额度时，才会查询并显示「N 次」。
+- 每个 API 一行：「已用 / 免费额度」，口径见下方「免费额度配置」。数字用英文缩写，保留一位小数，例如 4.3K、500K、1.2M。用量超过额度时，行首会标出「‼」。不显示调用次数；只有 `basis` 设为 `calls` 或没设额度时，才会查询并显示「N 次」。
 - 「Cost」这一行是 Vision / Translate 的净费用，只在金额 ≥ $0.01 时才显示。
 - 流量两行：
-  - 「Traffic Free」：本月标准层互联网出站流量（所有区域合计） / 每月 200 GiB 免费额度。账单确认有超额收费时，行首标「‼」。入站等其他免费流量不显示。
+  - 「Traffic Free」：本月标准层互联网出站流量（所有区域合计） / 每月 200 GiB 免费额度。单位 G 即 GiB。账单确认有超额收费时，行首标「‼」。入站等其他免费流量不显示。
   - 「Traffic Paid」：本月收费流量 / 这部分流量的费用，包括对等互连出站和标准出站的超额部分。
 - 面板图标使用 Surge 的 `info` 样式。
 - 多个账号出现相同的问题时，合并成底部一行提示。
@@ -51,7 +51,7 @@ const FREE_QUOTA = {
   // 只统计文档文字识别（DOCUMENT_TEXT_DETECTION），每个功能每月前 1,000 单位免费
   vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
   // 每月前 50 万字符免费，包括语言检测
-  translate: { limit: 500000, unit: "字符", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
+  translate: { limit: 500000, unit: "", basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
 ```
 
@@ -93,7 +93,7 @@ const FREE_QUOTA = {
 标准层出站是否收费以账单为准：
 - 账单上这类 SKU 的费用为 0 时，全部算免费，即使几个区域合计超过了 200 GiB。
 - 账单上有费用时，超额量先按每个区域（每个 SKU 对应一个区域）各 200 GiB 计算；每个区域都没超过时，再按全部区域合计计算。
-- 「Traffic Free x/200 GiB」里的 x 是所有区域的合计。x 超过 200 但账单为 0 时，不标「‼」。
+- 「Traffic Free xG/200G」里的 x 是所有区域的合计。x 超过 200 但账单为 0 时，不标「‼」。
 - 200 GiB 是按区域算还是按结算账号合计，我没能在官方定价页上确认，所以没有把其中一种写死。
 
 金额的含义：
