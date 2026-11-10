@@ -7,7 +7,7 @@ const { loadAccounts, buildSurgeScript, runInSurgeShim, parseFlags, DEFAULT_ACCO
 (async () => {
   const f = parseFlags(process.argv.slice(2));
   const panel = await runInSurgeShim(buildSurgeScript(loadAccounts(f.accounts || DEFAULT_ACCOUNTS)));
-  console.log(`${panel.title}  [icon=${panel.icon}]\n${panel.content}`);
+  console.log(`${panel.title}  [style=${panel.style}]\n${panel.content}`);
 })().catch((e) => {
   console.error("✗ " + e.message);
   process.exit(1);

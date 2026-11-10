@@ -33,6 +33,15 @@ const ACCOUNTS = [
 ];
 // </config>
 
+// 免费额度（每个结算账号每月），可按需修改：
+//   limit  免费额度；unit  显示单位
+//   basis  "calls" 按 Monitoring 调用次数（实时）；"billing" 按账单计费量（延迟数小时）
+const FREE_QUOTA = {
+  // Vision：每个功能每月前 1,000 单位免费；一次请求处理一张图、一个功能 = 1 单位，这里用调用次数近似
+  vision: { limit: 1000, unit: "次", basis: "calls" },
+  // Translate：每月前 50 万字符免费（Basic / Advanced NMT），按账单计费字符数统计
+  translate: { limit: 500000, unit: "字符", basis: "billing" },
+};
 const STANDARD_FREE_GIB = 200; // 标准层互联网出站每月免费额度
 const BILLING_TZ = "America/Los_Angeles"; // 账单月按太平洋时间划分
 
@@ -44,12 +53,10 @@ async function main() {
   const now = new Date();
   const period = billingMonth(now);
   const blocks = await Promise.all(ACCOUNTS.map((acc) => queryAccount(acc, period, now).catch((e) => ({ acc, error: e }))));
-  const hasError = blocks.some((b) => b.error || b.monitorError || b.billingError);
   return {
     title: `GCP 用量 · ${period.label}月 · ${hhmm(now)}`,
-    content: blocks.map(renderAccount).join("\n\n"),
-    icon: hasError ? "exclamationmark.icloud" : "cloud.fill",
-    "icon-color": hasError ? "#FBBC05" : "#4285F4",
+    content: render(blocks),
+    style: "info",
   };
 }
 
@@ -62,7 +69,7 @@ async function queryAccount(acc, period, now) {
       .catch((e) => ({ err: e })),
     queryBilling(token, acc, period.month)
       .then((rows) => ({ ok: summarizeBilling(rows) }))
-      .catch((e) => ({ err: /does not match any table/.test(errMsg(e)) ? new Error("导出表尚未生成（开启账单导出后需等待数小时）") : e })),
+      .catch((e) => ({ err: e })),
   ]);
   return { acc, counts: mon.ok, monitorError: mon.err, billing: bill.ok, billingError: bill.err };
 }
@@ -207,7 +214,7 @@ function summarizeBilling(rows) {
   }
   const stdOver = Math.max(0, s.stdGiB - STANDARD_FREE_GIB);
   s.freeGiB += s.stdGiB - stdOver;
-  if (stdOver > 0) addPaid(s, "Standard Out to Internet (超出 200 GiB)", stdOver, stdCost);
+  if (stdOver > 0) addPaid(s, "标准出站超额", stdOver, stdCost);
   s.paidItems.sort((a, b) => b.gib - a.gib);
   return s;
 }
@@ -224,50 +231,90 @@ function addPaid(s, sku, gib, cost) {
 }
 
 function shortSku(sku) {
-  let m = sku.match(/(Carrier|Direct) Peering Network\s*-\s*(\w+)/i);
-  if (m) return `${m[1]} Peering 出站 · ${m[2]}`;
-  m = sku.match(/CDN Interconnect.*?(?:-|from)\s*(.+)$/i);
-  if (m) return `CDN Interconnect · ${m[1]}`;
-  return sku.replace(/^Network\s+/i, "").replace(/Data Transfer\s+/i, "");
+  const m = sku.match(/(Carrier|Direct) Peering/i);
+  if (m) return `${m[1]} Peering`;
+  if (/CDN Interconnect/i.test(sku)) return "CDN Interconnect";
+  const s = sku.replace(/^Network\s+/i, "").replace(/Data Transfer\s+/i, "");
+  return s.length > 24 ? s.slice(0, 24) + "…" : s;
 }
 
 // ============================================================
 // 渲染
 // ============================================================
 
-function renderAccount(b) {
-  const lines = [`【${b.acc.name}】`];
-  if (b.error) return lines.concat("❌ " + errMsg(b.error)).join("\n");
-  const c = b.counts || {};
+// 面板宽度约 22 个汉字，每行尽量控制在此以内
+function render(blocks) {
+  const issues = [];
+  const body = blocks.map((b) => renderAccount(b, issues)).join("\n\n");
+
+  const footer = [];
+  const groups = [];
+  for (const it of issues) {
+    const g = groups.find((x) => x.scope === it.scope && x.msg === it.msg);
+    if (g) g.names.push(it.name);
+    else groups.push({ scope: it.scope, msg: it.msg, names: [it.name] });
+  }
+  for (const g of groups) {
+    let who = "";
+    if (blocks.length > 1) who = g.names.length === blocks.length ? "（全部账号）" : `（${g.names.join("、")}）`;
+    footer.push(`⚠ ${g.scope}：${g.msg}${who}`);
+  }
+  const times = blocks.map((b) => b.billing && b.billing.exportTime).filter(Boolean);
+  if (times.length) footer.push(`账单截至 ${mmddhhmm(new Date(Math.min.apply(null, times) * 1000))}`);
+
+  return footer.length ? body + "\n\n" + footer.join("\n") : body;
+}
+
+function renderAccount(b, issues) {
+  const name = b.acc.name;
+  const lines = [`▸ ${name}`];
+  if (b.error) return lines.concat(`✗ ${shortErr(b.error)}`).join("\n");
+  if (b.monitorError) issues.push({ scope: "调用次数", msg: shortErr(b.monitorError), name });
+  if (b.billingError) issues.push({ scope: "账单", msg: shortErr(b.billingError), name });
+
+  lines.push(`Vision ${apiUsage(b, "vision")}`);
+  lines.push(`Translate ${apiUsage(b, "translate")}`);
+
   const bill = b.billing;
-
-  for (const [key, label] of [["vision", "Vision"], ["translate", "Translate"]]) {
-    const calls = b.monitorError ? "?" : fmtInt(c[SERVICES[key]] || 0);
-    let line = `${label} ${calls} 次`;
-    if (bill) {
-      const t = bill[key];
-      line += ` · 计费 ${fmtQty(t.qty)}${unitLabel(t.unit)}`;
-      if (t.net > 0.005) line += ` · ${money(t.net, bill.currency)}`;
-    }
-    lines.push(line);
-  }
-
   if (bill) {
-    lines.push(`免费流量 ${gib(bill.freeGiB)}（标准出站 ${fmtNum(bill.stdGiB)}/${STANDARD_FREE_GIB}）`);
-    lines.push(`收费流量 ${gib(bill.paidGiB)} · ${money(bill.paidCost, bill.currency)}`);
-    for (const it of bill.paidItems.slice(0, 4)) lines.push(`  · ${it.name} ${gib(it.gib)}`);
-    if (bill.exportTime) lines.push(`账单截至 ${mmddhhmm(new Date(bill.exportTime * 1000))}`);
+    lines.push(`免费流量 ${gib(bill.freeGiB)}（出站 ${fmtNum(bill.stdGiB)}/${STANDARD_FREE_GIB}）`);
+    let paid = `收费流量 ${gib(bill.paidGiB)}`;
+    if (bill.paidItems.length === 1) paid += `（${bill.paidItems[0].name}）`;
+    if (bill.paidCost >= 0.01) paid += ` · ${money(bill.paidCost, bill.currency)}`;
+    lines.push(paid);
+    if (bill.paidItems.length > 1) for (const it of bill.paidItems.slice(0, 3)) lines.push(`  · ${it.name} ${gib(it.gib)}`);
   }
-  if (b.monitorError) lines.push("⚠️ 调用次数：" + errMsg(b.monitorError));
-  if (b.billingError) lines.push("⚠️ 账单：" + errMsg(b.billingError));
   return lines.join("\n");
 }
 
-function unitLabel(u) {
-  if (!u) return "";
-  if (/^count$/i.test(u)) return "";
-  if (/character/i.test(u)) return " 字符";
-  return " " + u;
+/** 例：「20 / 1,000 次」「29 次 · 12.3万 / 50万 字符 · $1.20」 */
+function apiUsage(b, key) {
+  const q = FREE_QUOTA[key] || {};
+  const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
+  const calls = callsN === null ? "?" : fmtInt(callsN);
+  const t = b.billing && b.billing[key];
+  const cost = t && t.net >= 0.01 ? ` · ${money(t.net, b.billing.currency)}` : "";
+
+  if (q.limit && q.basis === "billing") {
+    const used = t ? `${fmtBig(t.qty)} / ${fmtBig(q.limit)} ${q.unit}${overMark(t.qty, q.limit)}` : `额度 ${fmtBig(q.limit)} ${q.unit}`;
+    return `${calls} 次 · ${used}${cost}`;
+  }
+  if (q.limit) return `${calls} / ${fmtBig(q.limit)} ${q.unit}${overMark(callsN, q.limit)}${cost}`;
+  return `${calls} 次${cost}`;
+}
+
+function overMark(used, limit) {
+  return used !== null && used > limit ? " ‼超额" : "";
+}
+
+function shortErr(e) {
+  const m = errMsg(e);
+  if (/does not match any table/.test(m)) return "导出表未生成，需等数小时";
+  if (/密钥未配置/.test(m)) return "服务账号密钥未配置";
+  if (/invalid_grant|Invalid JWT|HTTP 401/i.test(m)) return "密钥无效";
+  if (/HTTP 403/.test(m)) return "无权限 (403)";
+  if (/timed? ?out|超时/i.test(m)) return "请求超时";
+  return m.length > 28 ? m.slice(0, 28) + "…" : m;
 }
 
 function money(v, cur) {
@@ -278,7 +325,11 @@ function money(v, cur) {
 
 const gib = (v) => `${fmtNum(v)} GiB`;
 const fmtNum = (v) => (v >= 100 ? v.toFixed(1) : v.toFixed(2));
-const fmtQty = (v) => (Number.isInteger(v) || v >= 1000 ? fmtInt(v) : v.toFixed(2));
+/** ≥ 1 万时用「万」，例：1,000 / 12.3万 / 50万 */
+function fmtBig(v) {
+  if (v < 10000) return Number.isInteger(v) ? fmtInt(v) : v.toFixed(2);
+  return (v / 10000).toFixed(1).replace(/\.0$/, "") + "万";
+}
 function fmtInt(v) {
   return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
@@ -619,5 +670,5 @@ main()
     $done(panel);
   })
   .catch((e) => {
-    $done({ title: "GCP 用量", content: "❌ " + errMsg(e), icon: "exclamationmark.icloud", "icon-color": "#EA4335" });
+    $done({ title: "GCP 用量", content: "✗ " + errMsg(e), style: "info" });
   });

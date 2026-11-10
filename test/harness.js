@@ -39,6 +39,13 @@ const BILLING_ROWS = [
   ["Cloud Translation API", "Translation", "count", 123456, 2.47, 0, -2.47],
 ];
 
+// 显示宽度：全角字符计 2，其余计 1
+function width(s) {
+  let w = 0;
+  for (const ch of s) w += /[\u2E80-\uFFEF]/.test(ch) ? 2 : 1;
+  return w;
+}
+
 function bqResponse(rows) {
   const fields = ["service", "sku", "unit", "qty", "cost", "free_credit", "other_credit", "currency", "export_time"];
   return {
@@ -168,14 +175,16 @@ function tokenRoute(keys) {
   assert.match(bqSql, /`proj-b\.billing_export\.gcp_billing_export_v1_\*`/);
   assert.match(bqSql, /invoice\.month = '\d{6}'/);
   const c = r.result.content;
-  assert.match(c, /Vision 1,234 次 · 计费 1,530 · \$0\.75/);
-  assert.match(c, /Translate 56 次 · 计费 123,456\n/); // 推广抵扣后净费用 0，不显示
-  assert.match(c, /免费流量 29\.90 GiB（标准出站 14\.59\/200）/); // 0.67+14.25+0.2+14.59+0.19
-  assert.match(c, /收费流量 0\.01 GiB · \$0\.0004/);
-  assert.match(c, /Carrier Peering 出站 · Americas 0\.01 GiB/);
-  assert.match(c, /【副号】[\s\S]*免费流量 200\.0 GiB（标准出站 230\.5\/200）/);
-  assert.match(c, /【副号】[\s\S]*收费流量 30\.50 GiB · \$2\.60/);
-  assert.match(c, /【副号】[\s\S]*Vision \? 次[\s\S]*⚠️ 调用次数：HTTP 403/);
+  assert.strictEqual(r.result.style, "info");
+  assert.strictEqual(r.result.icon, undefined);
+  assert.match(c, /▸ 主号\nVision 1,234 \/ 1,000 次 ‼超额 · \$0\.75\n/);
+  assert.match(c, /Translate 56 次 · 12\.3万 \/ 50万 字符\n/); // 推广抵扣后净费用 0，不显示金额
+  assert.match(c, /免费流量 29\.90 GiB（出站 14\.59\/200）\n/); // 0.67+14.25+0.2+14.59+0.19
+  assert.match(c, /收费流量 0\.01 GiB（Carrier Peering）\n/); // $0.0004 < 0.01 不显示金额
+  assert.match(c, /▸ 副号\nVision \? \/ 1,000 次\nTranslate \? 次 · 0 \/ 50万 字符\n/);
+  assert.match(c, /免费流量 200\.0 GiB（出站 230\.5\/200）\n收费流量 30\.50 GiB（标准出站超额） · \$2\.60/);
+  assert.match(c, /\n\n⚠ 调用次数：无权限 \(403\)（副号）\n账单截至 \d\d-\d\d \d\d:\d\d$/);
+  for (const line of c.split("\n")) assert.ok(width(line) <= 44, "行过长: " + line);
   assert.ok(r.notified, "notify=1 应推送通知");
   console.log("✓ 双账号流程、流量分类、部分失败显示");
 
@@ -209,7 +218,7 @@ function tokenRoute(keys) {
   // 5. 密钥未配置时给出可读错误
   {
     const res = await run({ accounts: [{ name: "空", billingDataset: "a.b", key: {} }], routes });
-    assert.match(res.result.content, /【空】\n❌ 服务账号密钥未配置/);
+    assert.match(res.result.content, /▸ 空\n✗ 服务账号密钥未配置/);
     console.log("✓ 未配置提示");
   }
   console.log("\n全部通过");

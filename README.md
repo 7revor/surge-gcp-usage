@@ -3,15 +3,23 @@
 用一个 Surge 面板脚本，分账号查看多个 GCP 账号的本月用量。
 
 ```
-GCP 用量 · 11月 · 12:51
-【main】
-Vision 1,234 次 · 计费 1,530 · $0.75
-Translate 56 次 · 计费 123,456
-免费流量 29.90 GiB（标准出站 14.59/200）
-收费流量 0.01 GiB · $0.0004
-  · Carrier Peering 出站 · Americas 0.01 GiB
+GCP 用量 · 11月 · 13:35
+▸ main
+Vision 20 / 1,000 次
+Translate 84 次 · 12.3万 / 50万 字符
+免费流量 29.90 GiB（出站 14.59/200）
+收费流量 0.01 GiB（Carrier Peering）
+
+▸ alt
+...
+
+⚠ 调用次数：无权限 (403)（alt）
 账单截至 11-10 13:00
 ```
+
+- 面板图标使用 Surge 的 `info` 样式。
+- 多个账号出现相同的问题时，合并成底部一行提示。
+- 「账单截至」显示所有账号中最早的那个账单导出时间。
 
 > **部署或新增账号**：按 [`docs/SETUP.md`](docs/SETUP.md) 一步步操作。这份手册是写给 Agent 用来引导用户的，每一步都有预期输出、分支判断和故障排查。Agent 的工作规则见 [`AGENTS.md`](AGENTS.md)。
 
@@ -26,6 +34,21 @@ Translate 56 次 · 计费 123,456
 Google 没有公开 API 能直接读取控制台的「账单报表」。Cloud Billing API 只能查账号信息和价目表，Budget API 只能查预算。所以按 SKU 统计用量，只能通过 BigQuery 账单导出来查。
 
 认证用的是每个账号各自的只读服务账号：角色为 `monitoring.viewer`、`bigquery.jobUser` 和 `bigquery.dataViewer`，密钥为 JSON 格式。Surge 没有 WebCrypto，所以脚本用纯 JS（BigInt）实现 RS256 签名，换来的 token 缓存约 1 小时。
+
+## 免费额度配置
+
+在 `gcp-usage.js` 开头修改 `FREE_QUOTA`。它在 `<config>` 区块之外，重新安装时不会被覆盖：
+
+```js
+const FREE_QUOTA = {
+  vision: { limit: 1000, unit: "次", basis: "calls" },        // 每个功能每月前 1,000 单位免费，用调用次数近似
+  translate: { limit: 500000, unit: "字符", basis: "billing" }, // 每月前 50 万字符免费，按账单计费字符数统计
+};
+```
+
+- `basis: "calls"`：用 Monitoring 的调用次数和额度比较，数据是实时的。
+- `basis: "billing"`：用账单里的计费量和额度比较，数据会延迟几个小时。账单数据还没到时，只显示「额度 50万 字符」。
+- 用量超过额度时，会标记「‼超额」。
 
 ## 流量分类规则
 
