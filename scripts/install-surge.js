@@ -31,7 +31,7 @@ const PANEL_RE = /script-name\s*=\s*gcp-usage\s*(,|$)/; // 不匹配 gcp-usage-n
   const script = buildSurgeScript(accounts);
   const target = path.join(surgeDir, "js", "gcp-usage.js");
   const scriptLine = "gcp-usage = type=generic,timeout=60,script-path=js/gcp-usage.js";
-  const panelLine = `GCP = title=GCP 用量,content=加载中,style=info,script-name=gcp-usage,update-interval=${interval}`;
+  const panelLine = `GCP = title=GCP Usage,content=加载中,style=info,script-name=gcp-usage,update-interval=${interval}`;
 
   console.log(`账号：${accounts.map((a) => a.name).join(", ")}`);
   if (f["dry-run"]) {

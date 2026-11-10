@@ -67,7 +67,7 @@ async function main() {
     if (b.billingError) log(`${b.acc.name} 账单: ${fullErr(b.billingError)}`);
   }
   return {
-    title: `GCP 用量 · ${period.label}月 · ${hhmm(now)}`,
+    title: `GCP Usage · ${hhmm(now)}`,
     content: render(blocks),
     style: "info",
   };
@@ -404,7 +404,7 @@ function billingMonth(now) {
   const guess = Date.UTC(y, m - 1, 1);
   const q = tzParts(new Date(guess));
   const offset = Date.UTC(q.year, q.month - 1, q.day, q.hour, q.minute, q.second) - guess;
-  return { start: new Date(guess - offset), month: `${y}${String(m).padStart(2, "0")}`, label: m };
+  return { start: new Date(guess - offset), month: `${y}${String(m).padStart(2, "0")}` };
 }
 
 function tzParts(date) {
@@ -747,5 +747,5 @@ main()
     $done(panel);
   })
   .catch((e) => {
-    $done({ title: "GCP 用量", content: "✗ " + errMsg(e), style: "info" });
+    $done({ title: "GCP Usage", content: "✗ " + errMsg(e), style: "info" });
   });

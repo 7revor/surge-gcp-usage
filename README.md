@@ -3,7 +3,7 @@
 用一个 Surge 面板脚本，分账号查看多个 GCP 账号的本月用量。
 
 ```
-GCP 用量 · 11月 · 13:41
+GCP Usage · 13:41
 ▸ main
 Vision: 19 / 1,000
 Translate: 5.8K / 500K
