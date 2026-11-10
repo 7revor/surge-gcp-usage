@@ -328,21 +328,21 @@ function renderAccount(b, issues) {
     const costs = [];
     if (bill.vision.net >= 0.01) costs.push(`Vision ${money(bill.vision.net, bill.currency)}`);
     if (bill.translate.net >= 0.01) costs.push(`Translate ${money(bill.translate.net, bill.currency)}`);
-    if (costs.length) lines.push(`Cost ${costs.join(" · ")}`);
+    if (costs.length) lines.push(`Cost: ${costs.join(" · ")}`);
 
     // Free：标准层出站 / 免费额度，账单确认有超额收费时行首加 ‼；Paid：收费流量 / 流量费用
-    const free = `Traffic Free ${gib(bill.stdGiB)}/${gib(STANDARD_FREE_GIB)}`;
+    const free = `Traffic Free: ${gib(bill.stdGiB)}/${gib(STANDARD_FREE_GIB)}`;
     lines.push(bill.stdOverGiB > 0 ? "‼ " + free : free);
-    lines.push(`Traffic Paid ${gib(bill.paidGiB)}/${money(bill.paidCost, bill.currency)}`);
+    lines.push(`Traffic Paid: ${gib(bill.paidGiB)}/${money(bill.paidCost, bill.currency)}`);
   }
   return lines.join("\n");
 }
 
-/** 例：「Vision 19/1,000」「Translate 5.6K/500K」（compact 时用 K/M 缩写），超额时行首加 ‼；没设额度时显示「Vision 20 次」 */
+/** 例：「Vision: 19/1,000」「Translate: 5.6K/500K」（compact 时用 K/M 缩写），超额时行首加 ‼；没设额度时显示「Vision: 20 次」 */
 function apiLine(b, key, label) {
   const q = FREE_QUOTA[key] || {};
   const callsN = b.monitorError ? null : (b.counts || {})[SERVICES[key]] || 0;
-  if (!q.limit) return `${label} ${callsN === null ? "?" : fmtInt(callsN)} 次`;
+  if (!q.limit) return `${label}: ${callsN === null ? "?" : fmtInt(callsN)} 次`;
 
   let used = null;
   if (q.basis === "quota") {
@@ -353,7 +353,7 @@ function apiLine(b, key, label) {
     used = callsN;
   }
   const fmt = q.compact ? fmtBig : fmtNum;
-  const line = `${label} ${used === null ? "?" : fmt(used)}/${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
+  const line = `${label}: ${used === null ? "?" : fmt(used)}/${fmt(q.limit)}${q.unit ? " " + q.unit : ""}`;
   return used !== null && used > q.limit ? "‼ " + line : line;
 }
 

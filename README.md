@@ -5,11 +5,11 @@
 ```
 GCP 用量 · 11月 · 13:41
 ▸ main
-Vision 19/1,000
-Translate 5.8K/500K
-Cost Vision $0.75
-Traffic Free 14.6G/200G
-Traffic Paid 0.01G/$0.0004
+Vision: 19/1,000
+Translate: 5.8K/500K
+Cost: Vision $0.75
+Traffic Free: 14.6G/200G
+Traffic Paid: 0.01G/$0.0004
 
 ▸ alt
 ...
@@ -93,7 +93,7 @@ const FREE_QUOTA = {
 标准层出站是否收费以账单为准：
 - 账单上这类 SKU 的费用为 0 时，全部算免费，即使几个区域合计超过了 200 GiB。
 - 账单上有费用时，超额量先按每个区域（每个 SKU 对应一个区域）各 200 GiB 计算；每个区域都没超过时，再按全部区域合计计算。
-- 「Traffic Free xG/200G」里的 x 是所有区域的合计。x 超过 200 但账单为 0 时，不标「‼」。
+- 「Traffic Free: xG/200G」里的 x 是所有区域的合计。x 超过 200 但账单为 0 时，不标「‼」。
 - 200 GiB 是按区域算还是按结算账号合计，我没能在官方定价页上确认，所以没有把其中一种写死。
 
 金额的含义：
