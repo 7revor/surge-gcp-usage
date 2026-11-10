@@ -119,7 +119,9 @@ gcloud iam service-accounts keys create ~/gcp-key-$NAME.json --iam-account=$SA &
 
 ### 分支 C-1：`Unable to create private file ... Permission denied`
 
-这是 Cloud Shell 主目录不可写。gcloud 是先在服务端创建密钥、再写本地文件，所以服务端可能已经生成了一把没保存下来的密钥，要先删掉：
+这是 Cloud Shell 主目录不可写。实际遇到过的原因是主目录权限变成了 `drw-------`（600），缺少执行位，用户自己也进不去。可以让用户执行 `ls -ld ~` 确认，`chmod 700 ~` 修复。
+
+gcloud 是先在服务端创建密钥、再写本地文件，所以服务端可能已经生成了一把没保存下来的密钥，要先删掉：
 
 ```bash
 for k in $(gcloud iam service-accounts keys list --iam-account=$SA --managed-by=user --format="value(name.basename())"); do
@@ -301,6 +303,7 @@ done
 |---|---|---|
 | for 循环查询 VM 没有任何输出 | `2>/dev/null` 吞掉了「启用 API？(y/N)」提示，循环卡在第一个项目 | 用步骤 A 的写法：加 `--quiet`，并且先判断 compute API 已启用再查 VM |
 | `Unable to create private file ... Permission denied` | Cloud Shell 主目录不可写 | 分支 C-1 |
+| `bq`/`gcloud` 报 `Permission denied: '~/.config/gcloud/active_config'`（`NamedConfigFileAccessError`） | 主目录权限是 `drw-------`，缺少执行位，进不去子目录 | `ls -ld ~` 确认后执行 `chmod 700 ~`；临时绕过可以先 `export CLOUDSDK_CONFIG=$(mktemp -d)` 再执行命令，Cloud Shell 的登录身份不依赖这个目录 |
 | `File /tmp/... is not in user's home directory` | `cloudshell download` 只能下载主目录里的文件 | 改用剪贴板方式，步骤 D 的 `--clipboard` |
 | `JSONDecodeError: Invalid control character` | 从终端复制时，长行被软换行打断 | `import-key.js` 会自动修复 |
 | `Key creation is not allowed ... iam.disableServiceAccountKeyCreation` | 组织的「默认安全」策略 | 分支 C-2 |
