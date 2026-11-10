@@ -38,12 +38,12 @@ const ACCOUNTS = [
 // </config>
 
 // 免费额度（每个结算账号每月），可按需修改：
-//   limit  免费额度；unit  显示单位；compact  为 true 时数字用 K/M 缩写（如 4.3K/500K），否则显示完整数字（如 19/1,000）
+//   limit  免费额度；unit  显示单位；compact  为 true 时数字用 K/M 缩写（如 4.3K/500K），否则显示完整数字，不加千分位（如 19/1000）
 //   basis  统计口径："quota" 按 quotaMetric 指定的配额用量（近实时）；"calls" 按 API 调用次数（近实时）；
 //          "billing" 按账单计费量（延迟数小时）
 const FREE_QUOTA = {
   // Vision：每个功能每月前 1,000 单位免费；这里只统计文档文字识别（DOCUMENT_TEXT_DETECTION）
-  vision: { limit: 1000, unit: "", compact: true, basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
+  vision: { limit: 1000, unit: "", basis: "quota", quotaMetric: "vision.googleapis.com/document_text_detection_requests" },
   // Translate：每月前 50 万字符免费；配额「发送到通用模型的字符数」，含语言检测，不含 Translation LLM / 自定义模型
   translate: { limit: 500000, unit: "", compact: true, basis: "quota", quotaMetric: "translate.googleapis.com/default" },
 };
@@ -510,12 +510,12 @@ function fmtBig(v) {
   if (Math.round(v / 1e3) < 1000) return short(v / 1e3) + "K";
   return short(v / 1e6) + "M";
 }
-/** 完整数字，千分位，例：19 / 1,000 / 12.50 */
+/** 完整数字，不加千分位，例：19 / 1000 / 12.50 */
 function fmtNum(v) {
   return Number.isInteger(v) ? fmtInt(v) : v.toFixed(2);
 }
 function fmtInt(v) {
-  return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return String(Math.round(v));
 }
 
 // ============================================================

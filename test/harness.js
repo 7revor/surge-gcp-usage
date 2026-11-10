@@ -218,13 +218,13 @@ function tokenRoute(keys) {
   assert.strictEqual(r.result.icon, "cloud.fill");
   assert.strictEqual(r.result["icon-color"], "#FF3B30"); // 有超额 → 红
   assert.match(r.result.title, /^GCP · \$3\.35 · \d\d:\d\d$/); // 标题带本月费用合计
-  assert.match(c, /主号\n  识图：1\.2K \/ 1K ▰▰▰▰▰▰ ‼\n/); // 只统计文档识别（label_detection 不计），超额时进度条填满、百分比换成 ‼；用 K 缩写；不显示调用次数
+  assert.match(c, /主号\n  识图：1200 \/ 1000 ▰▰▰▰▰▰ ‼\n/); // 只统计文档识别（label_detection 不计），超额时进度条填满、百分比换成 ‼；完整数字、不加千分位；不显示调用次数
   assert.match(c, /\n  翻译：5\.6K \/ 500K ▰▱▱▱▱▱ 1%\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格、至少 1%
   // 流量是 Monitoring 的外部出站（多个点求和）；缩进的免费 / 收费和截止时间来自账单
   assert.match(c, /费用：识图 \$0\.75\n  流量：15\.9G\n    免费：14\.6G \/ 200G ▰▱▱▱▱▱ 7%\n    收费：0\.01G · \$0\.0004\n    账单截至 \d\d-\d\d \d\d:\d\d\n/); // 免费只算标准层出站；收费为对等互连
   assert.match(bqSql, /MAX\(usage_end_time\) AS usage_end FROM m\)/); // 截止时间取整张表，不限服务
   assert.match(bqSql, /LEFT JOIN g ON TRUE/);
-  assert.match(c, /副号\n  识图：\? \/ 1K ▱▱▱▱▱▱\n  翻译：\? \/ 500K ▱▱▱▱▱▱\n  流量：\?\n/); // 数据缺失时进度条全空、不显示百分比
+  assert.match(c, /副号\n  识图：\? \/ 1000 ▱▱▱▱▱▱\n  翻译：\? \/ 500K ▱▱▱▱▱▱\n  流量：\?\n/); // 数据缺失时进度条全空、不显示百分比
   assert.match(c, /流量：\?\n    免费：231G \/ 200G ▰▰▰▰▰▰ ‼\n    收费：30\.5G · \$2\.60\n    账单截至 /); // 标准出站超额计入收费
   assert.match(c, /\n\n⚠ 用量：无权限（副号）$/);
   assert.doesNotMatch(c, /thru/);
@@ -242,7 +242,7 @@ function tokenRoute(keys) {
     assert.ok(cached.token && cached.exp > Date.now() / 1000);
     const r2 = await run({ accounts: one, routes, store: r1.store });
     assert.strictEqual(r2.calls.filter((x) => /oauth2/.test(x.url)).length, 0, "第二次运行应使用缓存的 token");
-    assert.match(r2.result.content, /识图：1\.2K \/ 1K ▰▰▰▰▰▰/);
+    assert.match(r2.result.content, /识图：1200 \/ 1000 ▰▰▰▰▰▰/);
     console.log("✓ token 缓存生效");
 
     // 缓存的 token 已失效（401）：丢弃缓存，重新签发后重试一次
@@ -254,7 +254,7 @@ function tokenRoute(keys) {
     const r3 = await run({ accounts: one, routes: reject401, store });
     assert.strictEqual(r3.calls.filter((x) => /oauth2/.test(x.url)).length, 1);
     assert.doesNotMatch(r3.result.content, /密钥无效|⚠/);
-    assert.match(r3.result.content, /识图：1\.2K \/ 1K ▰▰▰▰▰▰/);
+    assert.match(r3.result.content, /识图：1200 \/ 1000 ▰▰▰▰▰▰/);
     assert.match(r3.result.content, /\n    免费：14\.6G \/ 200G ▰▱▱▱▱▱ 7%/);
     assert.strictEqual(JSON.parse(store.get(cacheKey)).token, "tok-" + k1.json.client_email);
     console.log("✓ token 失效时自动重新签发");
@@ -312,13 +312,13 @@ function tokenRoute(keys) {
     assert.strictEqual(ctx.meter(1200, 1000, "v", true), "v ▰▰▰▰▰▰ ‼");
     assert.strictEqual(ctx.meter(null, 1000, "v", false), "v ▱▱▱▱▱▱");
     // API 用量刚好等于额度也算用完
-    assert.strictEqual(ctx.apiLine({ quota: { "vision.googleapis.com/document_text_detection_requests": 1000 } }, "vision", "识图"), "识图：1K / 1K ▰▰▰▰▰▰ ‼");
+    assert.strictEqual(ctx.apiLine({ quota: { "vision.googleapis.com/document_text_detection_requests": 1000 } }, "vision", "识图"), "识图：1000 / 1000 ▰▰▰▰▰▰ ‼");
 
     // 用量为 0 的 API 也显示，进度条全空
     const zeroQuota = { "vision.googleapis.com/document_text_detection_requests": 0, "translate.googleapis.com/default": 0 };
-    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: zeroQuota, trafficGiB: 0 }, []), "x\n  识图：0 / 1K ▱▱▱▱▱▱ 0%\n  翻译：0 / 500K ▱▱▱▱▱▱ 0%\n  流量：0G");
+    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: zeroQuota, trafficGiB: 0 }, []), "x\n  识图：0 / 1000 ▱▱▱▱▱▱ 0%\n  翻译：0 / 500K ▱▱▱▱▱▱ 0%\n  流量：0G");
     const someQuota = { ...zeroQuota, "translate.googleapis.com/default": 312000 };
-    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: someQuota, trafficGiB: 0 }, []), "x\n  识图：0 / 1K ▱▱▱▱▱▱ 0%\n  翻译：312K / 500K ▰▰▰▱▱▱ 62%\n  流量：0G");
+    assert.strictEqual(ctx.renderAccount({ acc: { name: "x" }, quota: someQuota, trafficGiB: 0 }, []), "x\n  识图：0 / 1000 ▱▱▱▱▱▱ 0%\n  翻译：312K / 500K ▰▰▰▱▱▱ 62%\n  流量：0G");
 
     // 图标颜色：正常绿；用量 ≥ 80% / 有费用 / 数据缺失橙；超额 / 认证失败红
     s = ctx.summarizeBilling([row("Oregon", 10, 0)]);
@@ -354,13 +354,13 @@ function tokenRoute(keys) {
       const { ctx: c } = await run({ accounts: [], routes: [], argument });
       return c.renderAccount({ acc: { name: "x" }, quota: q }, []).split("\n").slice(1, 3).join(" | ");
     };
-    assert.strictEqual(await lines(""), "  识图：1.2K / 1K ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱ 62%");
-    assert.strictEqual(await lines("bar=0"), "  识图：1.2K / 1K ‼ |   翻译：312K / 500K · 62%");
-    assert.strictEqual(await lines("percent=0"), "  识图：1.2K / 1K ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱");
-    assert.strictEqual(await lines("bar=0&percent=0&notify=1"), "  识图：1.2K / 1K ‼ |   翻译：312K / 500K");
-    assert.strictEqual(await lines("bar=1&percent=true"), "  识图：1.2K / 1K ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱ 62%");
+    assert.strictEqual(await lines(""), "  识图：1200 / 1000 ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱ 62%");
+    assert.strictEqual(await lines("bar=0"), "  识图：1200 / 1000 ‼ |   翻译：312K / 500K · 62%");
+    assert.strictEqual(await lines("percent=0"), "  识图：1200 / 1000 ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱");
+    assert.strictEqual(await lines("bar=0&percent=0&notify=1"), "  识图：1200 / 1000 ‼ |   翻译：312K / 500K");
+    assert.strictEqual(await lines("bar=1&percent=true"), "  识图：1200 / 1000 ▰▰▰▰▰▰ ‼ |   翻译：312K / 500K ▰▰▰▱▱▱ 62%");
     const { ctx: off } = await run({ accounts: [], routes: [], argument: "bar=0&percent=0" });
-    assert.strictEqual(off.renderAccount({ acc: { name: "x" }, quota: null }, []).split("\n")[1], "  识图：? / 1K"); // 数据缺失
+    assert.strictEqual(off.renderAccount({ acc: { name: "x" }, quota: null }, []).split("\n")[1], "  识图：? / 1000"); // 数据缺失
     console.log("✓ bar / percent 参数开关");
   }
 
