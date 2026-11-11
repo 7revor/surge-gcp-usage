@@ -61,12 +61,20 @@ function width(s) {
   return w / 1000;
 }
 
+// 账单统计截止时间：流量行最晚到 TRAFFIC_END，整张表（Logging 等）更晚 3 小时
+const TRAFFIC_END = 1762750800; // 2025-11-10 05:00 UTC
+// 按本地时区格式化为「MM-DD HH:MM」，和面板一致
+function ctx2mmdd(sec) {
+  const d = new Date(sec * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function bqResponse(rows) {
-  const fields = ["service", "sku", "unit", "qty", "cost", "free_credit", "other_credit", "currency", "usage_end"];
+  const fields = ["service", "sku", "unit", "qty", "cost", "free_credit", "other_credit", "currency", "usage_end", "traffic_end"];
   return {
     jobComplete: true,
     schema: { fields: fields.map((name) => ({ name })) },
-    rows: rows.map((r) => ({ f: [...r, "USD", "1.7627508E9"].map((v) => ({ v: String(v) })) })),
+    rows: rows.map((r) => ({ f: [...r, "USD", TRAFFIC_END + 3 * 3600, TRAFFIC_END].map((v) => ({ v: String(v) })) })),
   };
 }
 
@@ -222,7 +230,9 @@ function tokenRoute(keys) {
   assert.match(c, /\n  翻译：5\.6K \/ 500K ▰▱▱▱▱▱ 1%\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格、至少 1%
   // 流量是 Monitoring 的外部出站（多个点求和）；缩进的免费 / 收费和截止时间来自账单
   assert.match(c, /费用：识图 \$0\.75\n  流量：15\.9G\n    免费：14\.6G \/ 200G ▰▱▱▱▱▱ 7%\n    收费：0\.01G · \$0\.0004\n    账单截至 \d\d-\d\d \d\d:\d\d\n/); // 免费只算标准层出站；收费为对等互连
-  assert.match(bqSql, /MAX\(usage_end_time\) AS usage_end FROM m\)/); // 截止时间取整张表，不限服务
+  assert.match(bqSql, /MAX\(usage_end_time\) AS usage_end,/); // 整张表的截止时间只用来兜底
+  assert.match(bqSql, /MAX\(IF\(service\.description = 'Compute Engine' AND usage\.pricing_unit = 'gibibyte'/); // 截止时间取流量行
+  assert.match(c, new RegExp("账单截至 " + ctx2mmdd(TRAFFIC_END))); // 显示流量行的截止时间，不是整张表的
   assert.match(bqSql, /LEFT JOIN g ON TRUE/);
   assert.match(c, /副号\n  识图：\? \/ 1000 ▱▱▱▱▱▱\n  翻译：\? \/ 500K ▱▱▱▱▱▱\n  流量：\?\n/); // 数据缺失时进度条全空、不显示百分比
   assert.match(c, /流量：\?\n    免费：231G \/ 200G ▰▰▰▰▰▰ ‼\n    收费：30\.5G · \$2\.60\n    账单截至 /); // 标准出站超额计入收费
@@ -278,9 +288,9 @@ function tokenRoute(keys) {
     assert.deepStrictEqual([s.stdGiB, s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [300, 0, 300, 0, 0]);
     s.usageEnd = 1;
     assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s }, []), /\n    免费：300G \/ 200G ▰▰▰▰▰▰ 150%\n/); // 账单为 0 时不标 ‼
-    // 截止时间按手机本地时间显示，取所有行中最晚的 usage_end
+    // 截止时间按手机本地时间显示，优先取流量行的 traffic_end，没有流量行时用整张表的 usage_end
     const end = new Date(2026, 10, 10, 13, 0).getTime() / 1000;
-    s = ctx.summarizeBilling([{ ...row("Oregon", 1, 0), usage_end: String(end) }, { ...row("Iowa", 1, 0), usage_end: String(end - 3600) }]);
+    s = ctx.summarizeBilling([{ ...row("Oregon", 1, 0), usage_end: String(end + 7200), traffic_end: String(end) }, { ...row("Iowa", 1, 0), usage_end: String(end + 7200), traffic_end: String(end) }]);
     assert.match(ctx.renderAccount({ acc: { name: "x" }, billing: s, trafficGiB: 2.5 }, []), /^x\n[^]*\n  流量：2\.50G\n    免费：2\.00G \/ 200G ▰▱▱▱▱▱ 1%\n    收费：0G · \$0\.00\n    账单截至 11-10 13:00$/);
     // 本月还没有账单数据：LEFT JOIN 返回一行全空，显示「暂无账单」而不是 0G
     s = ctx.summarizeBilling([{ service: null, sku: null, unit: null, qty: null, cost: null, free_credit: null, other_credit: null, currency: null, usage_end: null }]);

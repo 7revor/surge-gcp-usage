@@ -255,15 +255,23 @@ function mergeCounts(list) {
 
 async function queryBilling(token, acc, month) {
   if (!/^[\w-]+\.[\w]+$/.test(acc.billingDataset || "")) throw new Error("billingDataset 格式应为 项目ID.数据集");
-  // usage_end：本月整张账单表（不限服务）里最新的用量结束时间，即账单统计截止点。
-  // 不能只看流量行：某段时间没有出站流量时，流量行的时间会停在过去。
-  // 用 LEFT JOIN 保证即使三类服务都没有记录，也会返回一行 usage_end。
+  // traffic_end：Compute Engine 流量行里最新的用量结束时间，即免费 / 收费的统计截止点。
+  // 不能取整张表：Logging、Networking 等服务导出得比流量快 3 小时左右（流量导出延迟中位数约 8 小时），
+  // 取整张表会让截止时间显示得比实际晚。入站、发往 Google 服务等流量行每小时都有，不会因为没有出站就停在过去。
+  // usage_end：整张表最新的用量结束时间，只在本月还没有流量行时兜底。
+  // 用 LEFT JOIN 保证即使三类服务都没有记录，也会返回一行。
   const sql = `
 WITH m AS (
   SELECT * FROM \`${acc.billingDataset}.gcp_billing_export_v1_*\`
   WHERE invoice.month = '${month}'
 ),
-c AS (SELECT MAX(usage_end_time) AS usage_end FROM m),
+c AS (
+  SELECT
+    MAX(usage_end_time) AS usage_end,
+    MAX(IF(service.description = 'Compute Engine' AND usage.pricing_unit = 'gibibyte'
+           AND REGEXP_CONTAINS(sku.description, r'(?i)transfer|egress|ingress'), usage_end_time, NULL)) AS traffic_end
+  FROM m
+),
 g AS (
   SELECT
     service.description AS service,
@@ -278,7 +286,7 @@ g AS (
   WHERE REGEXP_CONTAINS(service.description, r'(?i)compute engine|vision|translat')
   GROUP BY service, sku
 )
-SELECT g.*, c.usage_end FROM c LEFT JOIN g ON TRUE`;
+SELECT g.*, c.usage_end, c.traffic_end FROM c LEFT JOIN g ON TRUE`;
   const project = acc.billingDataset.split(".")[0];
   let res = await request("POST", `https://bigquery.googleapis.com/bigquery/v2/projects/${project}/queries`, token, {
     query: sql,
@@ -312,7 +320,7 @@ SELECT g.*, c.usage_end FROM c LEFT JOIN g ON TRUE`;
 function summarizeBilling(rows) {
   const s = {
     currency: "",
-    usageEnd: 0, // 账单统计截止时间（秒），0 表示本月还没有账单数据
+    usageEnd: 0, // 流量的账单统计截止时间（秒），本月还没有流量行时取整张表的；0 表示本月还没有账单数据
     vision: { qty: 0, unit: "", net: 0 },
     translate: { qty: 0, unit: "", net: 0 },
     freeGiB: 0,
@@ -328,7 +336,8 @@ function summarizeBilling(rows) {
     const cost = Number(r.cost) || 0;
     const freeCredit = Number(r.free_credit) || 0;
     const net = cost + freeCredit + (Number(r.other_credit) || 0);
-    s.usageEnd = Math.max(s.usageEnd, Number(r.usage_end) || 0);
+    // 每一行的 usage_end / traffic_end 都相同（来自 LEFT JOIN 的同一行）
+    s.usageEnd = Math.max(s.usageEnd, Number(r.traffic_end) || Number(r.usage_end) || 0);
     if (r.service == null) continue; // 本月没有这三类服务的记录时，只有一行 usage_end
     s.currency = s.currency || r.currency || "";
 
