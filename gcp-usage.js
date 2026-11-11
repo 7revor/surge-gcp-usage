@@ -551,13 +551,17 @@ function shortErr(e) {
 function money(v, cur) {
   cur = cur || "USD"; // 账单尚无数据时没有币种，按美元显示
   const sym = { USD: "$", CNY: "¥", HKD: "HK$", EUR: "€", JPY: "¥" }[cur];
-  const n = Math.abs(v) < 0.005 && v !== 0 ? v.toFixed(4) : v.toFixed(2);
-  return sym ? sym + n : `${n} ${cur || ""}`.trim();
+  const fmt = (n) => (sym ? sym + n : `${n} ${cur}`);
+  // 不足 1 美分时保留四位小数；连四位都显示不出来时写「<$0.0001」，不显示成 $0.0000
+  if (v > 0 && v < 0.00005) return "<" + fmt("0.0001");
+  return fmt(Math.abs(v) < 0.005 && v !== 0 ? v.toFixed(4) : v.toFixed(2));
 }
 
-// 按数量级缩短小数：0 显示 0，<10 两位，<100 一位，其余取整（按进位后的值判断，避免 99.97 显示成 100.0）
-const fmtG = (v) => (v === 0 ? "0" : v < 9.995 ? v.toFixed(2) : v < 99.95 ? v.toFixed(1) : v.toFixed(0));
-/** 流量，单位 GiB，写作 G，与 API 行的 K/M 风格一致，例：0G / 14.6G / 200G */
+// 按数量级缩短小数：0 显示 0，不足 0.005 显示 <0.01（不显示成 0.00），<10 两位，<100 一位，其余取整
+// （按进位后的值判断，避免 99.97 显示成 100.0）
+const fmtG = (v) =>
+  v === 0 ? "0" : v < 0.005 ? "<0.01" : v < 9.995 ? v.toFixed(2) : v < 99.95 ? v.toFixed(1) : v.toFixed(0);
+/** 流量，单位 GiB，写作 G，与 API 行的 K/M 风格一致，例：0G / <0.01G / 14.6G / 200G */
 const gib = (v) => `${fmtG(v)}G`;
 /** 英文缩写，不足 10 时保留一位小数，否则取整（保证进度条行不超宽），例：19 / 4.3K / 312K / 500K / 1.2M / 12M */
 function fmtBig(v) {

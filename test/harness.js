@@ -392,6 +392,21 @@ function tokenRoute(keys) {
     fit(ctx.renderAccount({ acc: { name: "x" }, billing: big, trafficGiB: 9999 }, []));
     assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 99.97 }, []), /\n  流量：100G$/); // 进位后不显示成 100.0G
     assert.match(ctx.renderAccount({ acc: { name: "x" }, trafficGiB: 9.996 }, []), /\n  流量：10\.0G$/);
+    // 有量但不足 0.005G 时显示 <0.01G，不显示成 0.00G；金额连四位小数都显示不出来时显示 <$0.0001
+    const peer = (qty, cost) => {
+      const b = ctx.summarizeBilling([{ service: "Compute Engine", sku: "Network Data Transfer Out via Carrier Peering Network - Americas Based", unit: "gibibyte", qty, cost }]);
+      b.usageEnd = end;
+      return ctx.renderAccount({ acc: { name: "x" }, billing: b, trafficGiB: qty }, []);
+    };
+    assert.match(peer(0.0038, 0.00028), /\n  流量：<0\.01G\n    免费：0G \/ 200G ▱▱▱▱▱▱ 0%\n    收费：<0\.01G · \$0\.0003\n/);
+    assert.match(peer(0.0006, 0.000025), /\n    收费：<0\.01G · <\$0\.0001\n/);
+    fit(peer(0.0006, 0.000025));
+    assert.match(peer(0.005, 0.0004), /\n    收费：0\.01G · \$0\.0004\n/);
+    assert.strictEqual(ctx.money(0, "USD"), "$0.00");
+    assert.strictEqual(ctx.money(0.00005, "USD"), "$0.0001");
+    assert.strictEqual(ctx.money(0.00002, "CNY"), "<¥0.0001");
+    assert.strictEqual(ctx.money(0.00002, "GBP"), "<0.0001 GBP");
+    assert.strictEqual(ctx.money(12.345, "GBP"), "12.35 GBP");
     console.log("✓ 进度条、零用量显示、图标状态色");
 
     // 参数开关：bar=0 不显示进度条（百分比前加「· 」），percent=0 不显示百分比，‼ 始终显示
