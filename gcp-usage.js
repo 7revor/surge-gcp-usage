@@ -89,14 +89,17 @@ async function main() {
   };
 }
 
-/** 所有账号本月费用合计：收费流量 + Vision/Translate 净费用 */
+/**
+ * 所有账号本月费用合计：整张账单（所有服务）扣掉所有抵扣后的净额。
+ * 不只算流量和 Vision/Translate：E2 免费层、Network Intelligence Center 的折扣等哪天没了，标题也能反映出来。
+ */
 function totalCost(blocks) {
   let amount = 0;
   let currency = "";
   for (const b of blocks) {
     const bill = b.billing;
     if (!bill) continue;
-    amount += Math.max(0, bill.paidCost) + Math.max(0, bill.vision.net) + Math.max(0, bill.translate.net);
+    amount += Math.max(0, bill.totalNet);
     currency = currency || bill.currency;
   }
   return { amount, currency };
@@ -297,6 +300,7 @@ async function queryBilling(token, acc, month) {
   // 不能取整张表：Logging、Networking 等服务导出得比流量快 3 小时左右（流量导出延迟中位数约 8 小时），
   // 取整张表会让截止时间显示得比实际晚。入站、发往 Google 服务等流量行每小时都有，不会因为没有出站就停在过去。
   // usage_end：整张表最新的用量结束时间，只在本月还没有流量行时兜底。
+  // total_net：整张账单（所有服务）扣掉所有抵扣后的净额，即本月实际要付的钱，用于标题的费用合计。
   // 用 LEFT JOIN 保证即使三类服务都没有记录，也会返回一行。
   const sql = `
 WITH m AS (
@@ -307,7 +311,8 @@ c AS (
   SELECT
     MAX(usage_end_time) AS usage_end,
     MAX(IF(service.description = 'Compute Engine' AND usage.pricing_unit = 'gibibyte'
-           AND REGEXP_CONTAINS(sku.description, r'(?i)transfer|egress|ingress'), usage_end_time, NULL)) AS traffic_end
+           AND REGEXP_CONTAINS(sku.description, r'(?i)transfer|egress|ingress'), usage_end_time, NULL)) AS traffic_end,
+    SUM(cost) + SUM((SELECT IFNULL(SUM(x.amount), 0) FROM UNNEST(credits) x)) AS total_net
   FROM m
 ),
 g AS (
@@ -324,7 +329,7 @@ g AS (
   WHERE REGEXP_CONTAINS(service.description, r'(?i)compute engine|vision|translat')
   GROUP BY service, sku
 )
-SELECT g.*, c.usage_end, c.traffic_end FROM c LEFT JOIN g ON TRUE`;
+SELECT g.*, c.usage_end, c.traffic_end, c.total_net FROM c LEFT JOIN g ON TRUE`;
   const project = acc.billingDataset.split(".")[0];
   let res = await request("POST", `https://bigquery.googleapis.com/bigquery/v2/projects/${project}/queries`, token, {
     query: sql,
@@ -358,6 +363,7 @@ SELECT g.*, c.usage_end, c.traffic_end FROM c LEFT JOIN g ON TRUE`;
 function summarizeBilling(rows) {
   const s = {
     currency: "",
+    totalNet: 0, // 整张账单的净额（所有服务，扣掉所有抵扣）
     usageEnd: 0, // 流量的账单统计截止时间（秒），本月还没有流量行时取整张表的；0 表示本月还没有账单数据
     vision: { qty: 0, unit: "", net: 0 },
     translate: { qty: 0, unit: "", net: 0 },
@@ -375,8 +381,9 @@ function summarizeBilling(rows) {
     const cost = Number(r.cost) || 0;
     const freeCredit = Number(r.free_credit) || 0;
     const net = cost + freeCredit + (Number(r.other_credit) || 0);
-    // 每一行的 usage_end / traffic_end 都相同（来自 LEFT JOIN 的同一行）
+    // 每一行的 usage_end / traffic_end / total_net 都相同（来自 LEFT JOIN 的同一行）
     s.usageEnd = Math.max(s.usageEnd, Number(r.traffic_end) || Number(r.usage_end) || 0);
+    s.totalNet = Number(r.total_net) || 0;
     if (r.service == null) continue; // 本月没有这三类服务的记录时，只有一行 usage_end
     s.currency = s.currency || r.currency || "";
 

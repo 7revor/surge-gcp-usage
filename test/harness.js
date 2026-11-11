@@ -69,12 +69,14 @@ function ctx2mmdd(sec) {
   const p = (n) => String(n).padStart(2, "0");
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-function bqResponse(rows) {
-  const fields = ["service", "sku", "unit", "qty", "cost", "free_credit", "other_credit", "currency", "usage_end", "traffic_end"];
+// otherNet：这几行以外的服务（如 Networking）的净额，计入整张账单的 total_net
+function bqResponse(rows, otherNet = 0) {
+  const fields = ["service", "sku", "unit", "qty", "cost", "free_credit", "other_credit", "currency", "usage_end", "traffic_end", "total_net"];
+  const totalNet = rows.reduce((n, r) => n + r[4] + r[5] + r[6], otherNet);
   return {
     jobComplete: true,
     schema: { fields: fields.map((name) => ({ name })) },
-    rows: rows.map((r) => ({ f: [...r, "USD", TRAFFIC_END + 3 * 3600, TRAFFIC_END].map((v) => ({ v: String(v) })) })),
+    rows: rows.map((r) => ({ f: [...r, "USD", TRAFFIC_END + 3 * 3600, TRAFFIC_END, totalNet].map((v) => ({ v: String(v) })) })),
   };
 }
 
@@ -208,7 +210,7 @@ function tokenRoute(keys) {
       ({ url, body }) => {
         bqSql = JSON.parse(body).query;
         if (url.includes("proj-b")) return [200, bqResponse([["Compute Engine", "Network Standard Data Transfer Out to Internet from Oregon", "gibibyte", 230.5, 2.6, 0, 0]])];
-        return [200, bqResponse(BILLING_ROWS)];
+        return [200, bqResponse(BILLING_ROWS, 1)];
       },
     ],
   ];
@@ -226,7 +228,8 @@ function tokenRoute(keys) {
   assert.strictEqual(r.result.style, undefined); // 用 SF Symbol 图标表示状态，不用 style
   assert.strictEqual(r.result.icon, "cloud.fill");
   assert.strictEqual(r.result["icon-color"], "#FF3B30"); // 有超额 → 红
-  assert.match(r.result.title, /^GCP · \$3\.35 · \d\d:\d\d$/); // 标题带本月费用合计
+  assert.match(r.result.title, /^GCP · \$4\.35 · \d\d:\d\d$/); // 标题是整张账单净额合计：主号 0.0004 + 0.75 + 其他服务 1，副号 2.6
+  assert.match(bqSql, /SUM\(cost\) \+ SUM\(\(SELECT IFNULL\(SUM\(x\.amount\), 0\) FROM UNNEST\(credits\) x\)\) AS total_net/);
   assert.match(c, /主号\n  识图：1200 \/ 1000 ▰▰▰▰▰▰ ‼\n/); // 只统计文档识别（label_detection 不计），超额时进度条填满、百分比换成 ‼；完整数字、不加千分位；不显示调用次数
   assert.match(c, /\n  翻译：5\.6K \/ 500K ▰▱▱▱▱▱ 1%\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格、至少 1%
   // 流量 = 账单外部出站 14.60（标准层 14.59 + 对等互连 0.01）+ 截止之后的 Monitoring 1.3；缩进的免费 / 收费和截止时间来自账单
@@ -361,10 +364,17 @@ function tokenRoute(keys) {
     const acc = { name: "x" };
     assert.strictEqual(ctx.panelLevel([{ acc, quota: someQuota, billing: s }]), 0);
     assert.strictEqual(ctx.panelLevel([{ acc, quota: { ...zeroQuota, "translate.googleapis.com/default": 400000 }, billing: s }]), 1);
-    assert.strictEqual(ctx.panelLevel([{ acc, quota: someQuota, billing: ctx.summarizeBilling([row("Oregon", 120, 1.2)]) }]), 1);
+    assert.strictEqual(ctx.panelLevel([{ acc, quota: someQuota, billing: ctx.summarizeBilling([{ ...row("Oregon", 120, 1.2), total_net: "1.2" }]) }]), 1);
     assert.strictEqual(ctx.panelLevel([{ acc, quota: someQuota, billingError: new Error("x") }]), 1);
     assert.strictEqual(ctx.panelLevel([{ acc, quota: { ...zeroQuota, "translate.googleapis.com/default": 600000 }, billing: s }]), 2);
     assert.strictEqual(ctx.panelLevel([{ acc, error: new Error("x") }]), 2);
+    // 只有流量 / Vision / Translate 以外的服务产生费用，也算有费用
+    const other = ctx.summarizeBilling([{ ...row("Oregon", 10, 0), total_net: "0.6" }]);
+    assert.strictEqual(other.paidCost, 0);
+    assert.strictEqual(ctx.totalCost([{ acc, billing: other }, { acc, billing: s }, { acc, error: new Error("x") }]).amount, 0.6);
+    assert.strictEqual(ctx.panelLevel([{ acc, quota: someQuota, billing: other }]), 1);
+    // 净额为负（如退款）不抵扣其他账号的费用
+    assert.strictEqual(ctx.totalCost([{ acc, billing: { ...other, totalNet: -3 } }, { acc, billing: other }]).amount, 0.6);
 
     // 最长的行也不超过面板宽度：识图 / 翻译各种用量（含超额、7 位数字），免费流量 0～400G（含超过 200G 但未收费），大额收费流量
     const fit = (text) => {
