@@ -169,10 +169,11 @@ function tokenRoute(keys) {
         if (project === "proj-b") return [403, { error: { message: "Permission monitoring.timeSeries.list denied" } }];
         if (/vm_flow\/egress_bytes_count/.test(filter)) {
           assert.match(filter, /remote_location_type="EXTERNAL"/);
-          assert.strictEqual(u.searchParams.get("aggregation.groupByFields"), "metric.labels.remote_location_type");
-          const gib = 2 ** 30;
-          const pt = (v) => ({ value: { int64Value: String(Math.round(v * gib)) } });
-          return [200, { timeSeries: [{ metric: { labels: { remote_location_type: "EXTERNAL" } }, points: [pt(10.5), pt(5.4)] }] }];
+          assert.strictEqual(u.searchParams.get("aggregation.alignmentPeriod"), "3600s"); // 按小时取点，才能只补账单截止之后的部分
+          // 截止前的点不计入（已在账单里）；跨过截止时间的点按比例计入一半；之后的点全部计入
+          const at = (sec) => new Date(sec * 1000).toISOString();
+          const pt = (endSec, v) => ({ interval: { startTime: at(endSec - 3600), endTime: at(endSec) }, value: { int64Value: String(Math.round(v * 2 ** 30)) } });
+          return [200, { timeSeries: [{ metric: { labels: {} }, points: [pt(TRAFFIC_END + 5400, 0.3), pt(TRAFFIC_END + 1800, 2), pt(TRAFFIC_END, 10)] }] }];
         }
         if (/quota\/rate\/net_usage/.test(filter)) {
           assert.strictEqual(u.searchParams.get("aggregation.groupByFields"), "metric.labels.quota_metric");
@@ -228,7 +229,7 @@ function tokenRoute(keys) {
   assert.match(r.result.title, /^GCP · \$3\.35 · \d\d:\d\d$/); // 标题带本月费用合计
   assert.match(c, /主号\n  识图：1200 \/ 1000 ▰▰▰▰▰▰ ‼\n/); // 只统计文档识别（label_detection 不计），超额时进度条填满、百分比换成 ‼；完整数字、不加千分位；不显示调用次数
   assert.match(c, /\n  翻译：5\.6K \/ 500K ▰▱▱▱▱▱ 1%\n/); // 字符数来自配额指标，不用账单；有用量时至少 1 格、至少 1%
-  // 流量是 Monitoring 的外部出站（多个点求和）；缩进的免费 / 收费和截止时间来自账单
+  // 流量 = 账单外部出站 14.60（标准层 14.59 + 对等互连 0.01）+ 截止之后的 Monitoring 1.3；缩进的免费 / 收费和截止时间来自账单
   assert.match(c, /费用：识图 \$0\.75\n  流量：15\.9G\n    免费：14\.6G \/ 200G ▰▱▱▱▱▱ 7%\n    收费：0\.01G · \$0\.0004\n    账单截至 \d\d-\d\d \d\d:\d\d\n/); // 免费只算标准层出站；收费为对等互连
   assert.match(bqSql, /MAX\(usage_end_time\) AS usage_end,/); // 整张表的截止时间只用来兜底
   assert.match(bqSql, /MAX\(IF\(service\.description = 'Compute Engine' AND usage\.pricing_unit = 'gibibyte'/); // 截止时间取流量行
@@ -313,6 +314,31 @@ function tokenRoute(keys) {
     s = ctx.summarizeBilling([row("Oregon", 120, 1.2)]);
     assert.deepStrictEqual([s.stdOverGiB, s.freeGiB, s.paidGiB, s.paidCost], [0, 120, 0, 1.2]);
     console.log("✓ 标准层出站按账单判断是否收费");
+
+    // 流量：账单截止前用账单，之后用 Monitoring；没有账单时全部用 Monitoring（月初前的部分按比例去掉）
+    {
+      const G = 2 ** 30;
+      const cut = Date.UTC(2026, 10, 9, 17) / 1000;
+      const pts = [
+        { start: (cut - 7200) * 1000, end: (cut - 3600) * 1000, bytes: 4 * G },
+        { start: (cut - 900) * 1000, end: (cut + 2700) * 1000, bytes: 2 * G }, // 截止后占 3/4
+        { start: (cut + 2700) * 1000, end: (cut + 6300) * 1000, bytes: 1 * G },
+      ];
+      const bill = ctx.summarizeBilling([
+        { ...row("Oregon", 3, 0), traffic_end: String(cut) },
+        { service: "Compute Engine", sku: "Network Data Transfer Out via Carrier Peering Network - Americas Based", unit: "gibibyte", qty: 0.5, cost: 0.04 },
+        { service: "Compute Engine", sku: "Network Internet Data Transfer Out from Americas to Americas", unit: "gibibyte", qty: 0.25, cost: 0 },
+        { service: "Compute Engine", sku: "Network Inter Region Data Transfer Out from Americas to EMEA", unit: "gibibyte", qty: 9, cost: 0 }, // 发往其他 GCP 区域，不算外部
+        { service: "Compute Engine", sku: "Network Standard Internet Data Transfer In to Oregon", unit: "gibibyte", qty: 9, cost: 0 }, // 入站
+      ]);
+      assert.strictEqual(bill.extGiB, 3.75);
+      assert.strictEqual(ctx.trafficGiB(pts, bill, new Date((cut - 86400) * 1000)), 3.75 + 1.5 + 1);
+      const monthStart = new Date((cut - 5400) * 1000); // 第一个点有一半在月初之前
+      assert.strictEqual(ctx.trafficGiB(pts, null, monthStart), 2 + 2 + 1);
+      assert.strictEqual(ctx.trafficGiB(pts, { ...bill, usageEnd: 0 }, monthStart), 5); // 本月暂无账单
+      assert.strictEqual(ctx.trafficGiB(null, bill, monthStart), null); // Monitoring 没取到
+      console.log("✓ 流量 = 账单出站 + 截止之后的 Monitoring");
+    }
 
     // 数值 + 进度条 + 百分比：有用量至少 1 格、至少 1%；格数和百分比都向下取整；用完时填满并换成 ‼；数据缺失全空、无百分比
     assert.strictEqual(ctx.meter(1, 1000, "v", false), "v ▰▱▱▱▱▱ 1%");

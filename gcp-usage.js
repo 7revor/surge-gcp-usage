@@ -2,7 +2,7 @@
  * GCP 用量面板（Surge）
  *
  * - Vision / Translate 本月调用次数与配额用量（已用/免费额度）：Cloud Monitoring（近实时）
- * - 本月外部出站流量（Traffic）：Cloud Monitoring vm_flow 指标（近实时，采样估算）
+ * - 本月外部出站流量：账单截止前用 BigQuery 账单，之后用 Cloud Monitoring vm_flow 指标补上（近实时，采样估算）
  * - Vision / Translate 净费用、Compute Engine 免费/收费流量：BigQuery 账单导出（延迟数小时）
  * - 多个 GCP 账号分开查询、分开显示
  *
@@ -156,7 +156,7 @@ async function queryWithToken(acc, period, now, token) {
         ok: {
           counts: mergeCounts(list.map((x) => x[0])),
           quota: mergeCounts(list.map((x) => x[1])),
-          trafficGiB: list.reduce((n, x) => n + (x[2].EXTERNAL || 0), 0) / GIB,
+          egress: list.reduce((all, x) => all.concat(x[2]), []),
         },
       }))
       .catch((e) => ({ err: e })),
@@ -168,7 +168,7 @@ async function queryWithToken(acc, period, now, token) {
     acc,
     counts: mon.ok && mon.ok.counts,
     quota: mon.ok && mon.ok.quota,
-    trafficGiB: mon.ok ? mon.ok.trafficGiB : null,
+    trafficGiB: mon.ok ? trafficGiB(mon.ok.egress, bill.ok, period.start) : null,
     monitorError: mon.err,
     billing: bill.ok,
     billingError: bill.err,
@@ -201,18 +201,56 @@ function quotaUsage(token, project, start, end) {
   return sumSeries(token, project, filter, "metric.labels.quota_metric", start, end);
 }
 
+const GIB = 1024 * 1024 * 1024;
+const HOUR_MS = 3600e3;
+
 /**
- * 外部出站字节数：vm_flow 指标里 remote_location_type = EXTERNAL 的部分，即发往互联网的流量。
- * 包括对等互连（如 Cloudflare）等收费出站，不分网络层级；按采样估算，和账单会有几个百分点的误差。
+ * 外部出站字节数，按小时返回 [{ start, end, bytes }]（毫秒）：vm_flow 指标里 remote_location_type = EXTERNAL 的部分，
+ * 即发往互联网的流量，包括对等互连（如 Cloudflare）等收费出站，不分网络层级。
+ * 它是采样估算的，实测比账单少 5%～20%，闲时只有账单的一半左右，所以只用来补账单截止之后的那一段（见 trafficGiB）。
  */
-function externalEgress(token, project, start, end) {
-  const filter =
-    'metric.type="networking.googleapis.com/vm_flow/egress_bytes_count" AND resource.type="gce_instance" AND ' +
-    'metric.labels.remote_location_type="EXTERNAL"';
-  return sumSeries(token, project, filter, "metric.labels.remote_location_type", start, end);
+async function externalEgress(token, project, start, end) {
+  const base = {
+    filter:
+      'metric.type="networking.googleapis.com/vm_flow/egress_bytes_count" AND resource.type="gce_instance" AND ' +
+      'metric.labels.remote_location_type="EXTERNAL"',
+    "interval.startTime": start.toISOString(),
+    "interval.endTime": end.toISOString(),
+    "aggregation.alignmentPeriod": HOUR_MS / 1000 + "s",
+    "aggregation.perSeriesAligner": "ALIGN_SUM",
+    "aggregation.crossSeriesReducer": "REDUCE_SUM",
+  };
+  const out = [];
+  let pageToken = "";
+  do {
+    const q = Object.assign({}, base, pageToken ? { pageToken } : {});
+    const res = await request("GET", `https://monitoring.googleapis.com/v3/projects/${encodeURIComponent(project)}/timeSeries?${qs(q)}`, token);
+    for (const ts of res.timeSeries || []) {
+      for (const pt of ts.points || []) {
+        const e = Date.parse(pt.interval.endTime);
+        let s = pt.interval.startTime ? Date.parse(pt.interval.startTime) : NaN;
+        if (!(s < e)) s = e - HOUR_MS;
+        out.push({ start: s, end: e, bytes: Number(pt.value.int64Value || pt.value.doubleValue || 0) });
+      }
+    }
+    pageToken = res.nextPageToken || "";
+  } while (pageToken);
+  return out;
 }
 
-const GIB = 1024 * 1024 * 1024;
+/**
+ * 本月外部出站总量（GiB）：账单截止时间之前用账单的出站量（准确），之后用 Monitoring 补上（采样估算）。
+ * 账单没取到或本月还没有账单时，全部用 Monitoring。跨过截止时间的那一小时按时间比例计入。
+ * Monitoring 没取到时返回 null。
+ */
+function trafficGiB(points, bill, monthStart) {
+  if (!points) return null;
+  const billed = bill && bill.usageEnd ? bill : null;
+  const from = billed ? billed.usageEnd * 1000 : monthStart.getTime();
+  let bytes = 0;
+  for (const p of points) bytes += p.bytes * Math.min(1, Math.max(0, (p.end - from) / (p.end - p.start)));
+  return (billed ? billed.extGiB : 0) + bytes / GIB;
+}
 
 /** 对 [start, end] 区间求和，按 groupBy（如 resource.labels.service）分组 */
 async function sumSeries(token, project, filter, groupBy, start, end) {
@@ -323,6 +361,7 @@ function summarizeBilling(rows) {
     usageEnd: 0, // 流量的账单统计截止时间（秒），本月还没有流量行时取整张表的；0 表示本月还没有账单数据
     vision: { qty: 0, unit: "", net: 0 },
     translate: { qty: 0, unit: "", net: 0 },
+    extGiB: 0, // 发往外部网络的出站（标准层 / 高级层互联网出站、对等互连出站），和 Monitoring 的 EXTERNAL 口径一致
     freeGiB: 0,
     stdGiB: 0,
     stdOverGiB: 0,
@@ -352,6 +391,7 @@ function summarizeBilling(rows) {
 
     const sku = r.sku;
     const isOut = /\bout\b|egress/i.test(sku);
+    if (isOut && /internet|peering|interconnect/i.test(sku)) s.extGiB += qty;
     if (/peering|interconnect/i.test(sku) && isOut) {
       addPaid(s, qty, cost + freeCredit);
     } else if (/standard/i.test(sku) && /internet/i.test(sku) && isOut) {
@@ -426,7 +466,7 @@ function renderAccount(b, issues) {
     if (costs.length) add(1, `费用：${costs.join(" · ")}`);
   }
 
-  // 流量：本月外部出站总量（Monitoring，实时）。下面缩进的免费 / 收费来自账单，最后一行是账单统计截止时间
+  // 流量：本月外部出站总量（账单 + 截止之后的 Monitoring，见 trafficGiB）。下面缩进的免费 / 收费来自账单，最后一行是账单统计截止时间
   // （手机本地时间，表示此前的用量已计入），只对免费 / 收费有效
   add(1, `流量：${b.trafficGiB == null ? "?" : gib(b.trafficGiB)}`);
   if (bill) {
